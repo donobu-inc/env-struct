@@ -1,6 +1,6 @@
 {
   "name": "env-struct",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "Schema-first environment variable loader with typed accessors and metadata.",
   "license": "Apache-2.0",
   "type": "module",
@@ -42,7 +42,7 @@
   },
   "homepage": "https://github.com/donobu-inc/env-struct#readme",
   "peerDependencies": {
-    "zod": "^3.25.76"
+    "zod": "^3.25.0 || ^4.0.0"
   },
   "devDependencies": {
     "prettier": "^3.3.3",
