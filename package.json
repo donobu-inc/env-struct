@@ -6,12 +6,13 @@
   "type": "module",
   "main": "./dist/index.cjs",
   "module": "./dist/index.js",
-  "types": "./dist/index.d.ts",
+  "types": "./dist/index.d.cts",
   "exports": {
     ".": {
-      "types": "./dist/index.d.ts",
+      "types": "./dist/index.d.cts",
       "import": "./dist/index.js",
-      "require": "./dist/index.cjs"
+      "require": "./dist/index.cjs",
+      "default": "./dist/index.js"
     }
   },
   "files": [
@@ -19,7 +20,8 @@
   ],
   "sideEffects": false,
   "scripts": {
-    "build": "tsup src/index.ts --dts --format esm,cjs --sourcemap --clean",
+    "build": "npm run format && tsup src/index.ts --dts --format esm,cjs --sourcemap --clean",
+    "format": "prettier --check .",
     "lint": "tsc --project tsconfig.test.json",
     "test": "vitest run"
   },
@@ -43,6 +45,7 @@
     "zod": "^3.25.76"
   },
   "devDependencies": {
+    "prettier": "^3.3.3",
     "tsup": "^8.5.0",
     "typescript": "^5.4.0",
     "vitest": "^1.5.0"

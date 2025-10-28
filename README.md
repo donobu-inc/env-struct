@@ -76,8 +76,7 @@ const schema = {
 const env = Env.fromSchema(schema, {
   SERVICE_ROUTES:
     '{"auth":"https://api.example.com/auth","billing":"https://api.example.com/billing"}',
-  WORKERS:
-    '[{"name":"email","concurrency":4},{"name":"cleanup","concurrency":1}]',
+  WORKERS: '[{"name":"email","concurrency":4},{"name":"cleanup","concurrency":1}]',
 });
 
 const billingUrl = env.data.SERVICE_ROUTES.billing;

@@ -16,8 +16,7 @@ describe('Env', () => {
       FEATURE_ENABLED: ' YeS ',
       CONFIG: ' { "nested": "value" } ',
       OPTIONAL: '  whitespace is preserved for string fields  ',
-      EXTRA:
-        'This is not included in the schema but it should not cause a failure',
+      EXTRA: 'This is not included in the schema but it should not cause a failure',
     });
 
     expect(env.data).toEqual({
@@ -57,9 +56,8 @@ describe('Env', () => {
       {
         PORT: '3000',
         NAME: ' example ',
-        EXTRA:
-          'This is not included in the schema but it should not cause a failure',
-      }
+        EXTRA: 'This is not included in the schema but it should not cause a failure',
+      },
     );
 
     expect(env.schema).toBeInstanceOf(ZodObject);
@@ -133,9 +131,7 @@ describe('Env', () => {
       FLAG: z.boolean(),
     });
 
-    expect(() => Env.fromZodObject(schema, { FLAG: 'maybe' })).toThrow(
-      ZodError
-    );
+    expect(() => Env.fromZodObject(schema, { FLAG: 'maybe' })).toThrow(ZodError);
   });
 
   it('throws a ZodError when numeric fields contain non-numeric data', () => {
@@ -143,9 +139,7 @@ describe('Env', () => {
       PORT: z.number(),
     });
 
-    expect(() => Env.fromZodObject(schema, { PORT: 'not-a-number' })).toThrow(
-      ZodError
-    );
+    expect(() => Env.fromZodObject(schema, { PORT: 'not-a-number' })).toThrow(ZodError);
   });
 
   it('requires object-like fields to contain valid JSON', () => {
@@ -153,9 +147,7 @@ describe('Env', () => {
       CONFIG: z.object({ nested: z.string() }),
     });
 
-    expect(() => Env.fromZodObject(schema, { CONFIG: '{broken json' })).toThrow(
-      ZodError
-    );
+    expect(() => Env.fromZodObject(schema, { CONFIG: '{broken json' })).toThrow(ZodError);
 
     const env = Env.fromZodObject(schema, { CONFIG: '{"nested":"value"}' });
     expect(env.data.CONFIG).toEqual({ nested: 'value' });
@@ -177,7 +169,7 @@ describe('Env', () => {
     expect(() =>
       Env.fromZodObject(schema, {
         ALSO_OPTIONAL: '',
-      })
+      }),
     ).toThrow(ZodError);
 
     const missing = Env.fromZodObject(schema, {});
@@ -239,7 +231,7 @@ describe('Env', () => {
               message: 'SECRET is required when FLAG is enabled',
             });
           }
-        })
+        }),
       );
 
     const env = Env.fromZodObject(schema, {
@@ -252,7 +244,7 @@ describe('Env', () => {
     expect(() =>
       subset.schema.parse({
         FLAG: 'enabled',
-      })
+      }),
     ).toThrow(ZodError);
   });
 
@@ -266,7 +258,7 @@ describe('Env', () => {
         {
           PORT: '5000',
           HOST: ' example.com ',
-        }
+        },
       );
 
       expect(env.data.PORT).toBe(5000);

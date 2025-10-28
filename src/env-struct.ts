@@ -51,13 +51,11 @@ type EnvVarNames<S extends ZodRawShape> = Readonly<{
   [K in keyof S & string]: K;
 }>;
 
-export type EnvShapeOf<TEnv extends Env<any>> =
-  TEnv extends Env<infer S> ? S : never;
+export type EnvShapeOf<TEnv extends Env<any>> = TEnv extends Env<infer S> ? S : never;
 
-export type EnvPick<
-  TEnv extends Env<any>,
-  Keys extends keyof EnvShapeOf<TEnv> & string,
-> = Env<{ [K in Keys]: EnvShapeOf<TEnv>[K] }>;
+export type EnvPick<TEnv extends Env<any>, Keys extends keyof EnvShapeOf<TEnv> & string> = Env<{
+  [K in Keys]: EnvShapeOf<TEnv>[K];
+}>;
 
 /** Resolve a default env source that works in Node and non-Node runtimes. */
 const getDefaultEnvSource = (): EnvSource => {
@@ -65,9 +63,9 @@ const getDefaultEnvSource = (): EnvSource => {
   return env ?? {};
 };
 
-  /**
-   * Opinionated, construction-time validator for environment variables.
-   * - Single z.object(...) schema enables cross-field rules via check()/superRefine.
+/**
+ * Opinionated, construction-time validator for environment variables.
+ * - Single z.object(...) schema enables cross-field rules via check()/superRefine.
  * - Source is DI-friendly (defaults to process.env).
  * - Validation happens on construction; throws ZodError on failure.
  * - Ergonomics: `env.data` exposes parsed values directly, `env.meta.MY_VAR.val` for individual access.
@@ -84,18 +82,11 @@ class EnvImpl<S extends ZodRawShape> {
   /** Declared environment variable names preserved as a literal map. */
   public readonly keys: EnvVarNames<S>;
 
-  private constructor(
-    schema: ZodObject<S>,
-    source: EnvSource = getDefaultEnvSource(),
-  ) {
+  private constructor(schema: ZodObject<S>, source: EnvSource = getDefaultEnvSource()) {
     this.schema = schema;
     this.source = source;
-    const declaredKeys = Object.keys(this.schema.shape) as Array<
-      keyof S & string
-    >;
-    this.keys = createEnvVarNames(
-      declaredKeys as readonly (keyof S & string)[],
-    );
+    const declaredKeys = Object.keys(this.schema.shape) as Array<keyof S & string>;
+    this.keys = createEnvVarNames(declaredKeys as readonly (keyof S & string)[]);
     // Build candidates from raw strings with minimal coercion.
     const { parsed, rawByKey } = buildValues(this.schema, this.source);
     // Capture parsed values while building frozen metadata containers.
@@ -140,9 +131,11 @@ class EnvImpl<S extends ZodRawShape> {
     }>;
     // Cross-field validations live inside the internal `_def.checks` array. If no
     // refinements exist we can return early with the simple pick result.
-    const baseChecks = (this.schema as unknown as {
-      _def?: { checks?: Array<{ _zod?: { check?: (val: unknown, ctx: unknown) => void } }> };
-    })._def?.checks;
+    const baseChecks = (
+      this.schema as unknown as {
+        _def?: { checks?: Array<{ _zod?: { check?: (val: unknown, ctx: unknown) => void } }> };
+      }
+    )._def?.checks;
 
     if (Array.isArray(baseChecks) && baseChecks.length > 0) {
       // Knowing which keys were picked lets us skip rehydrating values that callers
@@ -168,18 +161,24 @@ class EnvImpl<S extends ZodRawShape> {
 
           for (const check of baseChecks) {
             const run = check?._zod?.check as
-              | ((payload: { value: unknown; issues: unknown[]; addIssue: (issue: any) => void }) => void)
+              | ((payload: {
+                  value: unknown;
+                  issues: unknown[];
+                  addIssue: (issue: any) => void;
+                }) => void)
               | undefined;
             if (typeof run === 'function') {
               const originalValue = ctx.value;
               try {
                 // Temporarily mirror the full dataset so cross-field checks see prior values.
                 ctx.value = snapshot as typeof data;
-                run(ctx as unknown as {
-                  value: unknown;
-                  issues: unknown[];
-                  addIssue: (issue: any) => void;
-                });
+                run(
+                  ctx as unknown as {
+                    value: unknown;
+                    issues: unknown[];
+                    addIssue: (issue: any) => void;
+                  },
+                );
               } finally {
                 // Restore the payload so other refinements (if any) receive the expected context.
                 ctx.value = originalValue;
@@ -193,10 +192,7 @@ class EnvImpl<S extends ZodRawShape> {
     return EnvImpl.fromZodObject(subsetSchema, this.source);
   }
 
-  public static fromSchema<S extends ZodRawShape>(
-    schema: S,
-    source?: EnvSource,
-  ): Env<S> {
+  public static fromSchema<S extends ZodRawShape>(schema: S, source?: EnvSource): Env<S> {
     const zodSchema = z.object(schema);
     return new EnvImpl(zodSchema, source);
   }
@@ -220,9 +216,7 @@ class EnvImpl<S extends ZodRawShape> {
     values: Source,
   ): Env<EnvShapeFromRecord<Source>> {
     const names = Object.keys(values) as (keyof Source & string)[];
-    const schema = buildSchemaFromNames(
-      names as readonly (keyof Source & string)[],
-    );
+    const schema = buildSchemaFromNames(names as readonly (keyof Source & string)[]);
 
     return new EnvImpl(schema, values);
   }
@@ -233,10 +227,7 @@ export type Env<S extends ZodRawShape> = EnvImpl<S>;
 
 /* ---------------- Internal, opinionated parsing ---------------- */
 
-function buildValues<S extends ZodRawShape>(
-  schema: ZodObject<S>,
-  source: EnvSource,
-) {
+function buildValues<S extends ZodRawShape>(schema: ZodObject<S>, source: EnvSource) {
   const shape = schema.shape as unknown as Record<string, ZodType | undefined>;
   const rawByKey: Record<string, string | undefined> = {};
   const candidate: Record<string, unknown> = {};
@@ -253,10 +244,7 @@ function buildValues<S extends ZodRawShape>(
   return { parsed, rawByKey };
 }
 
-function coerceValue(
-  schema: ZodType | undefined,
-  raw: string | undefined,
-): unknown {
+function coerceValue(schema: ZodType | undefined, raw: string | undefined): unknown {
   if (raw == null) {
     return undefined;
   }
@@ -363,16 +351,12 @@ function unwrapType(schema: ZodType | undefined): ZodType | undefined {
   return current;
 }
 
-function getTypeTag(
-  def: { typeName?: string; type?: string } | null | undefined,
-) {
+function getTypeTag(def: { typeName?: string; type?: string } | null | undefined) {
   if (!def) {
     return undefined;
   }
 
-  return (
-    (def.typeName as string | undefined) ?? (def.type as string | undefined)
-  );
+  return (def.typeName as string | undefined) ?? (def.type as string | undefined);
 }
 
 function isObjectLike(typeName: string): boolean {
