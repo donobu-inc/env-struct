@@ -35,12 +35,12 @@
   "author": "Donobu",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/donobu/env-struct.git"
+    "url": "git+https://github.com/donobu-inc/env-struct.git"
   },
   "bugs": {
-    "url": "https://github.com/donobu/env-struct/issues"
+    "url": "https://github.com/donobu-inc/env-struct/issues"
   },
-  "homepage": "https://github.com/donobu/env-struct#readme",
+  "homepage": "https://github.com/donobu-inc/env-struct#readme",
   "peerDependencies": {
     "zod": "^3.25.76"
   },
