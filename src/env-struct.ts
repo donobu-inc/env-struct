@@ -1,0 +1,410 @@
+import { z, ZodObject, ZodRawShape, ZodType } from 'zod/v4';
+
+export type EnvSource = Record<string, string | undefined>;
+
+/** Helper to infer per-key value types from the Zod object. */
+export type InferEnv<S extends ZodRawShape> = { [K in keyof S]: z.infer<S[K]> };
+
+/**
+ * Creates a frozen record that maps each literal in the env var list back to itself.
+ * Consumers rely on this to keep compile-time and runtime views of env var names aligned.
+ */
+const createEnvVarNames = <const Names extends readonly string[]>(
+  names: Names,
+): Readonly<{ [K in Names[number]]: K }> => {
+  const result = {} as { [K in Names[number]]: K };
+
+  for (const name of names) {
+    const key = name as Names[number];
+    result[key] = key;
+  }
+
+  return Object.freeze(result);
+};
+
+/** Shape built when only variable names are provided. */
+type EnvShapeFromNames<Names extends readonly string[]> = {
+  [K in Names[number]]: z.ZodOptional<z.ZodString>;
+};
+
+type EnvShapeFromRecord<Source extends EnvSource> = {
+  [K in keyof Source & string]: z.ZodOptional<z.ZodString>;
+};
+
+/** Per-variable reflection and value. */
+export interface EnvVar<TValue, TName extends string> {
+  readonly name: TName;
+  readonly val: TValue;
+  readonly raw: string | undefined;
+}
+
+type MetaByKey<S extends ZodRawShape> = Readonly<{
+  [K in keyof S & string]: EnvVar<InferEnv<S>[K], K>;
+}>;
+
+/** Readonly view into parsed env variable values. */
+type DataAccessor<S extends ZodRawShape> = {
+  readonly [K in keyof S & string]: InferEnv<S>[K];
+};
+
+type EnvVarNames<S extends ZodRawShape> = Readonly<{
+  [K in keyof S & string]: K;
+}>;
+
+export type EnvShapeOf<TEnv extends Env<any>> =
+  TEnv extends Env<infer S> ? S : never;
+
+export type EnvPick<
+  TEnv extends Env<any>,
+  Keys extends keyof EnvShapeOf<TEnv> & string,
+> = Env<{ [K in Keys]: EnvShapeOf<TEnv>[K] }>;
+
+/** Resolve a default env source that works in Node and non-Node runtimes. */
+const getDefaultEnvSource = (): EnvSource => {
+  const env = (globalThis as { process?: { env?: EnvSource } }).process?.env;
+  return env ?? {};
+};
+
+  /**
+   * Opinionated, construction-time validator for environment variables.
+   * - Single z.object(...) schema enables cross-field rules via check()/superRefine.
+ * - Source is DI-friendly (defaults to process.env).
+ * - Validation happens on construction; throws ZodError on failure.
+ * - Ergonomics: `env.data` exposes parsed values directly, `env.meta.MY_VAR.val` for individual access.
+ */
+class EnvImpl<S extends ZodRawShape> {
+  /** Whole-object schema used for validation. */
+  public readonly schema: ZodObject<S>;
+  /** Raw env-var source. */
+  public readonly source: EnvSource;
+  /** Per-key metadata including parsed and raw values. */
+  public readonly meta: MetaByKey<S>;
+  /** Direct value access keyed by env var name. */
+  public readonly data: DataAccessor<S>;
+  /** Declared environment variable names preserved as a literal map. */
+  public readonly keys: EnvVarNames<S>;
+
+  private constructor(
+    schema: ZodObject<S>,
+    source: EnvSource = getDefaultEnvSource(),
+  ) {
+    this.schema = schema;
+    this.source = source;
+    const declaredKeys = Object.keys(this.schema.shape) as Array<
+      keyof S & string
+    >;
+    this.keys = createEnvVarNames(
+      declaredKeys as readonly (keyof S & string)[],
+    );
+    // Build candidates from raw strings with minimal coercion.
+    const { parsed, rawByKey } = buildValues(this.schema, this.source);
+    // Capture parsed values while building frozen metadata containers.
+    const metaByKey = {} as {
+      [K in keyof S & string]: EnvVar<InferEnv<S>[K], K>;
+    };
+    const dataAccessor = {} as DataAccessor<S>;
+    // Populate metadata and value accessors for each declared key.
+    for (const key of declaredKeys) {
+      metaByKey[key] = Object.freeze({
+        name: key,
+        val: (parsed as any)[key],
+        raw: rawByKey[key],
+      });
+      Object.defineProperty(dataAccessor, key, {
+        enumerable: true,
+        get: () => (parsed as any)[key],
+      });
+    }
+
+    this.meta = Object.freeze(metaByKey) as MetaByKey<S>;
+    this.data = Object.freeze(dataAccessor);
+  }
+
+  /**
+   * Create a new Env scoped to a subset of keys while reusing the same source.
+   */
+  public pick<const Keys extends readonly (keyof S & string)[]>(
+    ...keys: Keys
+  ): Env<{ [K in Keys[number]]: S[K] }> {
+    // Build a Zod pick mask keyed by the original schema names. We use a partial
+    // record so the compiler accepts extra keys beyond the exact subset literal.
+    const mask: Partial<Record<keyof S & string, true>> = {};
+
+    for (const key of keys) {
+      mask[key] = true;
+    }
+
+    // Start with a plain Zod-level pick so field-level constraints stay intact.
+    let subsetSchema = this.schema.pick(mask as any) as unknown as ZodObject<{
+      [K in Keys[number]]: S[K];
+    }>;
+    // Cross-field validations live inside the internal `_def.checks` array. If no
+    // refinements exist we can return early with the simple pick result.
+    const baseChecks = (this.schema as unknown as {
+      _def?: { checks?: Array<{ _zod?: { check?: (val: unknown, ctx: unknown) => void } }> };
+    })._def?.checks;
+
+    if (Array.isArray(baseChecks) && baseChecks.length > 0) {
+      // Knowing which keys were picked lets us skip rehydrating values that callers
+      // may want to intentionally leave blank during validation.
+      const baseKeys = Object.keys(this.schema.shape) as Array<keyof S & string>;
+      const picked = new Set(keys as readonly (keyof S & string)[]);
+      subsetSchema = subsetSchema.check(
+        z.superRefine((data, ctx) => {
+          // Create a shallow copy of the parsed subset so we can layer in any missing
+          // fields required by the original refinement logic.
+          const snapshot = { ...(data as Record<string, unknown>) };
+
+          for (const key of baseKeys) {
+            if (picked.has(key)) {
+              continue;
+            }
+            if (!(key in snapshot)) {
+              // Feed previously parsed values back into the snapshot. This mirrors what
+              // the original refinement saw without forcing new parsing work.
+              snapshot[key] = (this.data as any)[key];
+            }
+          }
+
+          for (const check of baseChecks) {
+            const run = check?._zod?.check as
+              | ((payload: { value: unknown; issues: unknown[]; addIssue: (issue: any) => void }) => void)
+              | undefined;
+            if (typeof run === 'function') {
+              const originalValue = ctx.value;
+              try {
+                // Temporarily mirror the full dataset so cross-field checks see prior values.
+                ctx.value = snapshot as typeof data;
+                run(ctx as unknown as {
+                  value: unknown;
+                  issues: unknown[];
+                  addIssue: (issue: any) => void;
+                });
+              } finally {
+                // Restore the payload so other refinements (if any) receive the expected context.
+                ctx.value = originalValue;
+              }
+            }
+          }
+        }),
+      );
+    }
+
+    return EnvImpl.fromZodObject(subsetSchema, this.source);
+  }
+
+  public static fromSchema<S extends ZodRawShape>(
+    schema: S,
+    source?: EnvSource,
+  ): Env<S> {
+    const zodSchema = z.object(schema);
+    return new EnvImpl(zodSchema, source);
+  }
+
+  public static fromZodObject<S extends ZodRawShape>(
+    schema: ZodObject<S>,
+    source?: EnvSource,
+  ): Env<S> {
+    return new EnvImpl(schema, source);
+  }
+
+  public static fromNames<const Names extends readonly string[]>(
+    names: Names,
+    source?: EnvSource,
+  ): Env<EnvShapeFromNames<Names>> {
+    const schema = buildSchemaFromNames(names);
+    return new EnvImpl<EnvShapeFromNames<Names>>(schema, source);
+  }
+
+  public static fromValues<const Source extends EnvSource>(
+    values: Source,
+  ): Env<EnvShapeFromRecord<Source>> {
+    const names = Object.keys(values) as (keyof Source & string)[];
+    const schema = buildSchemaFromNames(
+      names as readonly (keyof Source & string)[],
+    );
+
+    return new EnvImpl(schema, values);
+  }
+}
+
+export const Env = EnvImpl;
+export type Env<S extends ZodRawShape> = EnvImpl<S>;
+
+/* ---------------- Internal, opinionated parsing ---------------- */
+
+function buildValues<S extends ZodRawShape>(
+  schema: ZodObject<S>,
+  source: EnvSource,
+) {
+  const shape = schema.shape as unknown as Record<string, ZodType | undefined>;
+  const rawByKey: Record<string, string | undefined> = {};
+  const candidate: Record<string, unknown> = {};
+
+  for (const key of Object.keys(shape)) {
+    const raw = source[key];
+    rawByKey[key] = raw;
+    const fieldSchema = shape[key];
+    candidate[key] = coerceValue(fieldSchema, raw);
+  }
+
+  // Enforce field-level and cross-field rules. Let ZodError bubble.
+  const parsed = schema.parse(candidate) as InferEnv<S>;
+  return { parsed, rawByKey };
+}
+
+function coerceValue(
+  schema: ZodType | undefined,
+  raw: string | undefined,
+): unknown {
+  if (raw == null) {
+    return undefined;
+  }
+
+  const normalized = raw.trim();
+  const baseSchema = unwrapType(schema);
+  const typeName = getTypeTag(baseSchema?._def);
+
+  // Object-like schemas: require valid JSON.
+  if (typeName && isObjectLike(typeName)) {
+    return mustJsonParse(raw);
+  }
+
+  // Numbers.
+  if (typeName === 'ZodNumber' || typeName === 'number') {
+    if (normalized === '') {
+      return raw;
+    }
+
+    const n = Number(normalized);
+    return Number.isNaN(n) ? raw : n;
+  }
+
+  // Booleans: true/false/1/0/on/off/yes/no (case-insensitive).
+  if (typeName === 'ZodBoolean' || typeName === 'boolean') {
+    const v = normalized.toLowerCase();
+
+    if (v === 'true' || v === '1' || v === 'on' || v === 'yes') {
+      return true;
+    } else if (v === 'false' || v === '0' || v === 'off' || v === 'no') {
+      return false;
+    } else {
+      return raw; // let Zod produce a precise error
+    }
+  }
+
+  // Strings: preserve raw value.
+  if (typeName === 'ZodString' || typeName === 'string') {
+    return raw;
+  }
+
+  // Fallback: attempt JSON first; if parse fails, keep original string.
+  try {
+    const trimmed = normalized;
+    if (trimmed !== '' && (trimmed.startsWith('{') || trimmed.startsWith('['))) {
+      return JSON.parse(trimmed);
+    }
+  } catch {
+    return raw;
+  }
+
+  return raw;
+}
+
+function unwrapType(schema: ZodType | undefined): ZodType | undefined {
+  let current: ZodType | undefined = schema;
+  const seen = new Set<ZodType>();
+
+  while (current && !seen.has(current)) {
+    seen.add(current);
+    const def = current._def as unknown as {
+      typeName?: string;
+      type?: string;
+      innerType?: ZodType;
+      schema?: ZodType;
+      out?: ZodType;
+    } | null;
+    const typeName = getTypeTag(def);
+
+    if (
+      typeName === 'ZodOptional' ||
+      typeName === 'optional' ||
+      typeName === 'ZodNullable' ||
+      typeName === 'nullable' ||
+      typeName === 'ZodDefault' ||
+      typeName === 'default' ||
+      typeName === 'ZodCatch' ||
+      typeName === 'catch' ||
+      typeName === 'ZodReadonly' ||
+      typeName === 'readonly'
+    ) {
+      current = def?.innerType;
+      continue;
+    }
+
+    if (
+      typeName === 'ZodEffects' ||
+      typeName === 'effects' ||
+      typeName === 'ZodBranded' ||
+      typeName === 'branded'
+    ) {
+      current = def?.schema;
+      continue;
+    }
+
+    if (typeName === 'ZodPipeline' || typeName === 'pipeline') {
+      current = def?.out;
+      continue;
+    }
+
+    break;
+  }
+
+  return current;
+}
+
+function getTypeTag(
+  def: { typeName?: string; type?: string } | null | undefined,
+) {
+  if (!def) {
+    return undefined;
+  }
+
+  return (
+    (def.typeName as string | undefined) ?? (def.type as string | undefined)
+  );
+}
+
+function isObjectLike(typeName: string): boolean {
+  return (
+    typeName === 'ZodObject' ||
+    typeName === 'object' ||
+    typeName === 'ZodArray' ||
+    typeName === 'array' ||
+    typeName === 'ZodRecord' ||
+    typeName === 'record' ||
+    typeName === 'ZodMap' ||
+    typeName === 'map' ||
+    typeName === 'ZodTuple' ||
+    typeName === 'tuple' ||
+    typeName === 'ZodSet' ||
+    typeName === 'set'
+  );
+}
+
+function mustJsonParse(s: string): unknown {
+  try {
+    return JSON.parse(s);
+  } catch {
+    return s; // invalid JSON; schema.parse will surface a clear error
+  }
+}
+
+function buildSchemaFromNames<const Names extends readonly string[]>(
+  names: Names,
+): ZodObject<EnvShapeFromNames<Names>> {
+  const shape = Object.fromEntries(
+    names.map((name) => [name, z.string().optional()] as const),
+  ) as EnvShapeFromNames<Names>;
+  return z.object(shape);
+}

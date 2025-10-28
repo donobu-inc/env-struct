@@ -1,0 +1,315 @@
+import { describe, expect, it } from 'vitest';
+import { z, ZodError, ZodObject } from 'zod/v4';
+import { Env } from '../src';
+
+describe('Env', () => {
+  it('parses typed values, and exposes rich metadata', () => {
+    const schema = z.object({
+      PORT: z.number(),
+      FEATURE_ENABLED: z.boolean(),
+      CONFIG: z.object({ nested: z.string() }),
+      OPTIONAL: z.string().optional(),
+    });
+
+    const env = Env.fromZodObject(schema, {
+      PORT: ' 8080 ',
+      FEATURE_ENABLED: ' YeS ',
+      CONFIG: ' { "nested": "value" } ',
+      OPTIONAL: '  whitespace is preserved for string fields  ',
+      EXTRA:
+        'This is not included in the schema but it should not cause a failure',
+    });
+
+    expect(env.data).toEqual({
+      PORT: 8080,
+      FEATURE_ENABLED: true,
+      CONFIG: { nested: 'value' },
+      OPTIONAL: '  whitespace is preserved for string fields  ',
+    });
+
+    expect(env.meta.PORT).toEqual({
+      name: 'PORT',
+      val: 8080,
+      raw: ' 8080 ',
+    });
+
+    expect(env.data.PORT).toBe(8080);
+    expect(env.data.CONFIG).toEqual({ nested: 'value' });
+
+    expect(env.keys).toEqual({
+      PORT: 'PORT',
+      FEATURE_ENABLED: 'FEATURE_ENABLED',
+      CONFIG: 'CONFIG',
+      OPTIONAL: 'OPTIONAL',
+    });
+
+    expect(Object.isFrozen(env.meta)).toBe(true);
+    expect(Object.isFrozen(env.meta.PORT)).toBe(true);
+    expect(Object.isFrozen(env.data)).toBe(true);
+  });
+
+  it('supports constructing from a plain ZodRawShape', () => {
+    const env = Env.fromSchema(
+      {
+        PORT: z.number(),
+        NAME: z.string(),
+      },
+      {
+        PORT: '3000',
+        NAME: ' example ',
+        EXTRA:
+          'This is not included in the schema but it should not cause a failure',
+      }
+    );
+
+    expect(env.schema).toBeInstanceOf(ZodObject);
+    expect(env.data.PORT).toBe(3000);
+    expect(env.data.NAME).toBe(' example ');
+  });
+
+  it('infers a string schema from an env var name list', () => {
+    const env = Env.fromNames(['FOO', 'BAR', 'MISSING'] as const, {
+      FOO: 'hello',
+      BAR: ' world ',
+      EXTRA: 'value',
+    });
+
+    expect(env.schema.shape.FOO).toBeDefined();
+    expect(env.schema.shape.BAR).toBeDefined();
+    expect(env.schema.shape.MISSING).toBeDefined();
+
+    expect(env.data.FOO).toBe('hello');
+    expect(env.data.BAR).toBe(' world ');
+    expect(env.data.MISSING).toBe(undefined);
+
+    expect(env.meta.FOO).toEqual({
+      name: 'FOO',
+      val: 'hello',
+      raw: 'hello',
+    });
+    expect(env.meta.BAR).toEqual({
+      name: 'BAR',
+      val: ' world ',
+      raw: ' world ',
+    });
+    expect(env.meta.MISSING).toEqual({
+      name: 'MISSING',
+      val: undefined,
+      raw: undefined,
+    });
+    expect(env.keys).toEqual({
+      FOO: 'FOO',
+      BAR: 'BAR',
+      MISSING: 'MISSING',
+    });
+  });
+
+  it.each([
+    ['true', true],
+    ['1', true],
+    ['on', true],
+    ['yes', true],
+    ['false', false],
+    ['0', false],
+    ['off', false],
+    ['no', false],
+  ])('coerces boolean token %s to %s', (rawValue, expected) => {
+    const schema = z.object({
+      FLAG: z.boolean(),
+    });
+
+    const env = Env.fromZodObject(schema, { FLAG: rawValue });
+
+    expect(env.data.FLAG).toBe(expected);
+    expect(env.meta.FLAG).toEqual({
+      name: 'FLAG',
+      val: expected,
+      raw: rawValue,
+    });
+  });
+
+  it('throws a ZodError when boolean tokens are unrecognised', () => {
+    const schema = z.object({
+      FLAG: z.boolean(),
+    });
+
+    expect(() => Env.fromZodObject(schema, { FLAG: 'maybe' })).toThrow(
+      ZodError
+    );
+  });
+
+  it('throws a ZodError when numeric fields contain non-numeric data', () => {
+    const schema = z.object({
+      PORT: z.number(),
+    });
+
+    expect(() => Env.fromZodObject(schema, { PORT: 'not-a-number' })).toThrow(
+      ZodError
+    );
+  });
+
+  it('requires object-like fields to contain valid JSON', () => {
+    const schema = z.object({
+      CONFIG: z.object({ nested: z.string() }),
+    });
+
+    expect(() => Env.fromZodObject(schema, { CONFIG: '{broken json' })).toThrow(
+      ZodError
+    );
+
+    const env = Env.fromZodObject(schema, { CONFIG: '{"nested":"value"}' });
+    expect(env.data.CONFIG).toEqual({ nested: 'value' });
+  });
+
+  it('preserves blank strings and distinguishes them from missing values', () => {
+    const schema = z.object({
+      OPTIONAL: z.string().optional(),
+      ALSO_OPTIONAL: z.number().optional(),
+    });
+
+    const withBlankString = Env.fromZodObject(schema, {
+      OPTIONAL: '   ',
+    });
+    expect(withBlankString.data.OPTIONAL).toBe('   ');
+    expect(withBlankString.meta.OPTIONAL.raw).toBe('   ');
+    expect(withBlankString.data.ALSO_OPTIONAL).toBeUndefined();
+
+    expect(() =>
+      Env.fromZodObject(schema, {
+        ALSO_OPTIONAL: '',
+      })
+    ).toThrow(ZodError);
+
+    const missing = Env.fromZodObject(schema, {});
+    expect(missing.data.OPTIONAL).toBeUndefined();
+    expect(missing.data.ALSO_OPTIONAL).toBeUndefined();
+    expect(missing.meta.OPTIONAL.raw).toBeUndefined();
+    expect(missing.meta.ALSO_OPTIONAL.raw).toBeUndefined();
+  });
+
+  it('applies JSON parsing fallback for non-object schemas when possible', () => {
+    const schema = z.object({
+      ANYTHING: z.any(),
+    });
+
+    const env = Env.fromZodObject(schema, { ANYTHING: '{"answer":42}' });
+
+    expect(env.data.ANYTHING).toEqual({ answer: 42 });
+    expect(env.meta.ANYTHING.raw).toBe('{"answer":42}');
+  });
+
+  it('avoids JSON parsing literal-like strings in fallback mode', () => {
+    const schema = z.object({
+      FLAG: z.enum(['true', 'false']),
+    });
+
+    const env = Env.fromZodObject(schema, { FLAG: 'true' });
+
+    expect(env.data.FLAG).toBe('true');
+    expect(env.meta.FLAG.raw).toBe('true');
+  });
+
+  it('creates a scoped Env via pick while sharing the same source', () => {
+    const baseEnv = Env.fromNames(['FOO', 'BAR', 'BAZ'] as const, {
+      FOO: ' foo ',
+      BAR: 'bar',
+      BAZ: 'baz',
+    });
+
+    const subset = baseEnv.pick('FOO', 'BAR');
+
+    expect(subset.data.FOO).toBe(' foo ');
+    expect(subset.data.BAR).toBe('bar');
+    expect(subset.keys).toEqual({ FOO: 'FOO', BAR: 'BAR' });
+    expect(subset.meta.FOO.raw).toBe(' foo ');
+    expect(subset.meta.BAR.raw).toBe('bar');
+  });
+
+  it('preserves schema refinements when using pick', () => {
+    const schema = z
+      .object({
+        FLAG: z.literal('enabled'),
+        SECRET: z.string().optional(),
+      })
+      .check(
+        z.superRefine((data, ctx) => {
+          if (data.FLAG === 'enabled' && !data.SECRET) {
+            ctx.addIssue({
+              code: 'custom',
+              message: 'SECRET is required when FLAG is enabled',
+            });
+          }
+        })
+      );
+
+    const env = Env.fromZodObject(schema, {
+      FLAG: 'enabled',
+      SECRET: 'shh',
+    });
+
+    const subset = env.pick('FLAG', 'SECRET');
+
+    expect(() =>
+      subset.schema.parse({
+        FLAG: 'enabled',
+      })
+    ).toThrow(ZodError);
+  });
+
+  describe('factory helpers', () => {
+    it('creates an Env via fromSchema', () => {
+      const env = Env.fromSchema(
+        {
+          PORT: z.number(),
+          HOST: z.string(),
+        },
+        {
+          PORT: '5000',
+          HOST: ' example.com ',
+        }
+      );
+
+      expect(env.data.PORT).toBe(5000);
+      expect(env.data.HOST).toBe(' example.com ');
+    });
+
+    it('creates an Env via fromZodObject', () => {
+      const schema = z.object({
+        API_KEY: z.string(),
+      });
+
+      const env = Env.fromZodObject(schema, { API_KEY: 'secret' });
+
+      expect(env.data.API_KEY).toBe('secret');
+      expect(env.schema).toBe(schema);
+    });
+
+    it('creates an Env via fromNames', () => {
+      const env = Env.fromNames(['FOO', 'BAR'] as const, {
+        FOO: ' value ',
+        BAR: 'other',
+      });
+
+      expect(env.data.FOO).toBe(' value ');
+      expect(env.data.BAR).toBe('other');
+      expect(env.schema.shape.FOO).toBeDefined();
+    });
+
+    it('infers schema from values via fromValues', () => {
+      const env = Env.fromValues({
+        ANTHROPIC_API_KEY: ' test-anthropic-key ',
+        GOOGLE_GENERATIVE_AI_API_KEY: 'test-google-key',
+        OPENAI_API_KEY: 'test-openai-key',
+      });
+
+      expect(env.data.ANTHROPIC_API_KEY).toBe(' test-anthropic-key ');
+      expect(env.data.GOOGLE_GENERATIVE_AI_API_KEY).toBe('test-google-key');
+      expect(env.data.OPENAI_API_KEY).toBe('test-openai-key');
+      expect(env.keys).toEqual({
+        ANTHROPIC_API_KEY: 'ANTHROPIC_API_KEY',
+        GOOGLE_GENERATIVE_AI_API_KEY: 'GOOGLE_GENERATIVE_AI_API_KEY',
+        OPENAI_API_KEY: 'OPENAI_API_KEY',
+      });
+    });
+  });
+});

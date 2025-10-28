@@ -1,0 +1,50 @@
+{
+  "name": "env-struct",
+  "version": "1.0.0",
+  "description": "Schema-first environment variable loader with typed accessors and metadata.",
+  "license": "Apache-2.0",
+  "type": "module",
+  "main": "./dist/index.cjs",
+  "module": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js",
+      "require": "./dist/index.cjs"
+    }
+  },
+  "files": [
+    "dist"
+  ],
+  "sideEffects": false,
+  "scripts": {
+    "build": "tsup src/index.ts --dts --format esm,cjs --sourcemap --clean",
+    "lint": "tsc --project tsconfig.test.json",
+    "test": "vitest run"
+  },
+  "keywords": [
+    "env",
+    "environment",
+    "zod",
+    "schema",
+    "validation"
+  ],
+  "author": "Donobu",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/donobu/env-struct.git"
+  },
+  "bugs": {
+    "url": "https://github.com/donobu/env-struct/issues"
+  },
+  "homepage": "https://github.com/donobu/env-struct#readme",
+  "peerDependencies": {
+    "zod": "^3.25.76"
+  },
+  "devDependencies": {
+    "tsup": "^8.5.0",
+    "typescript": "^5.4.0",
+    "vitest": "^1.5.0"
+  }
+}
