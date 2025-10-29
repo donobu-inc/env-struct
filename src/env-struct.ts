@@ -47,6 +47,17 @@ type DataAccessor<S extends ZodRawShape> = {
   readonly [K in keyof S & string]: InferEnv<S>[K];
 };
 
+type NormalizePlain<S extends string> = S extends Uppercase<S> ? Lowercase<S> : S;
+
+type SnakeToCamelCase<S extends string> = S extends `${infer Head}_${infer Tail}`
+  ? `${Lowercase<Head>}${Capitalize<SnakeToCamelCase<Tail>>}`
+  : NormalizePlain<S>;
+
+/** Readonly camelCase view into parsed env variable values. */
+type CamelDataAccessor<S extends ZodRawShape> = {
+  readonly [K in keyof S & string as SnakeToCamelCase<K>]: InferEnv<S>[K];
+};
+
 type EnvVarNames<S extends ZodRawShape> = Readonly<{
   [K in keyof S & string]: K;
 }>;
@@ -79,6 +90,8 @@ class EnvImpl<S extends ZodRawShape> {
   public readonly meta: MetaByKey<S>;
   /** Direct value access keyed by env var name. */
   public readonly data: DataAccessor<S>;
+  /** Direct value access keyed by camelCase env var name (best-effort; collisions prefer first key). */
+  public readonly camel: CamelDataAccessor<S>;
   /** Declared environment variable names preserved as a literal map. */
   public readonly keys: EnvVarNames<S>;
 
@@ -94,6 +107,9 @@ class EnvImpl<S extends ZodRawShape> {
       [K in keyof S & string]: EnvVar<InferEnv<S>[K], K>;
     };
     const dataAccessor = {} as DataAccessor<S>;
+    // `camel` mirrors the parsed values but exposes camelCase property names for convenience.
+    // We keep this as a plain object so we can wire lazy getters that share the same parsed cache.
+    const camelAccessor: Record<string, unknown> = {};
     // Populate metadata and value accessors for each declared key.
     for (const key of declaredKeys) {
       metaByKey[key] = Object.freeze({
@@ -105,10 +121,21 @@ class EnvImpl<S extends ZodRawShape> {
         enumerable: true,
         get: () => (parsed as any)[key],
       });
+      const camelKey = snakeToCamelKey(key);
+      // If two schema keys normalize to the same camelCase form, prefer the first declaration.
+      // This avoids throwing on duplicate `defineProperty` calls and leaves the camel view best-effort.
+      if (Object.prototype.hasOwnProperty.call(camelAccessor, camelKey)) {
+        continue;
+      }
+      Object.defineProperty(camelAccessor, camelKey, {
+        enumerable: true,
+        get: () => (parsed as any)[key],
+      });
     }
 
     this.meta = Object.freeze(metaByKey) as MetaByKey<S>;
     this.data = Object.freeze(dataAccessor);
+    this.camel = Object.freeze(camelAccessor) as CamelDataAccessor<S>;
   }
 
   /**
@@ -190,6 +217,29 @@ class EnvImpl<S extends ZodRawShape> {
     }
 
     return EnvImpl.fromZodObject(subsetSchema, this.source);
+  }
+
+  /**
+   * Create a new Env without the specified keys while reusing the same source.
+   * Throws if any omitted key was not declared on the original schema.
+   */
+  public omit<const Keys extends readonly (keyof S & string)[]>(
+    ...keys: Keys
+  ): Env<{ [K in Exclude<keyof S & string, Keys[number]>]: S[K] }> {
+    const declaredKeys = Object.keys(this.schema.shape) as Array<keyof S & string>;
+    const declaredSet = new Set(declaredKeys);
+
+    for (const key of keys) {
+      if (!declaredSet.has(key)) {
+        throw new Error(`Env.omit(): attempted to omit undeclared key "${key}"`);
+      }
+    }
+
+    const omitSet = new Set(keys as readonly (keyof S & string)[]);
+    const kept = declaredKeys.filter((key) => !omitSet.has(key));
+
+    const picked = this.pick(...(kept as readonly (keyof S & string)[]));
+    return picked as Env<{ [K in Exclude<keyof S & string, Keys[number]>]: S[K] }>;
   }
 
   public static fromSchema<S extends ZodRawShape>(schema: S, source?: EnvSource): Env<S> {
@@ -391,4 +441,16 @@ function buildSchemaFromNames<const Names extends readonly string[]>(
     names.map((name) => [name, z.string().optional()] as const),
   ) as EnvShapeFromNames<Names>;
   return z.object(shape);
+}
+
+/**
+ * Convert a declared schema key into its camelCase accessor form.
+ * Keeps pre-camel keys intact while downcasing ALL_CAPS and SNAKE_CASE names.
+ */
+function snakeToCamelKey(key: string): string {
+  if (key.includes('_')) {
+    return key.toLowerCase().replace(/_([a-z])/g, (_, letter: string) => letter.toUpperCase());
+  }
+
+  return key === key.toUpperCase() ? key.toLowerCase() : key;
 }

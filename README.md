@@ -26,8 +26,17 @@ import { z } from 'zod/v4';
 import { Env } from 'env-struct';
 
 const schema = {
-  PORT: z.coerce.number().default(3000),
+  PORT: z.number().default(3000),
   FEATURE_FLAG: z.enum(['on', 'off']).default('off'),
+  ROUTES: z
+    .object({
+      api: z.string().url(),
+      docs: z.string().url(),
+    })
+    .default({
+      api: 'https://api.example.com',
+      docs: 'https://docs.example.com',
+    }),
 };
 
 const env = Env.fromSchema(schema); // defaults to process.env
@@ -35,9 +44,37 @@ const env = Env.fromSchema(schema); // defaults to process.env
 console.log(env.data.PORT); // parsed number (lazy getter)
 console.log(env.meta.FEATURE_FLAG); // { name, val, raw }
 console.log(env.keys.PORT); // "PORT"
+console.log(env.data.ROUTES.api); // structured field stays parsed
 ```
 
 ## Examples
+
+### Use camelCase accessors
+
+```ts
+import { z } from 'zod/v4';
+import { Env } from 'env-struct';
+
+const env = Env.fromSchema({
+  API_URL: z.string().url(),
+  FEATURE_FLAG: z.enum(['on', 'off']).default('off'),
+});
+
+// `camel` exposes the same parsed values with camelCase property names.
+console.log(env.camel.apiUrl); // from API_URL
+console.log(env.camel.featureFlag); // from FEATURE_FLAG
+
+// If two keys normalize to the same camel form, the first declaration wins.
+// e.g. FOO_BAR and fooBar => env.camel.fooBar === value of FOO_BAR.
+
+// Spread into idiomatic config objects without manual renaming.
+const httpConfig = {
+  timeoutMs: 1000,
+  ...env.camel,
+};
+
+console.log(httpConfig.apiUrl); // camelCase key ready for other modules
+```
 
 ### Share scoped env helpers with `pick`
 
@@ -46,7 +83,7 @@ import { z } from 'zod/v4';
 import { Env } from 'env-struct';
 
 const base = Env.fromSchema({
-  PORT: z.coerce.number().default(3000),
+  PORT: z.number().default(3000),
   FEATURE_FLAG: z.enum(['on', 'off', 'beta']).default('off'),
   DB_URL: z.string().url(),
 });
@@ -58,6 +95,26 @@ serve({
   port: serverEnv.data.PORT,
   featureFlag: serverEnv.data.FEATURE_FLAG,
 });
+```
+
+### Drop fields while preserving validation with `omit`
+
+```ts
+import { z } from 'zod/v4';
+import { Env } from 'env-struct';
+
+const fullEnv = Env.fromSchema({
+  PORT: z.number().default(3000),
+  DB_URL: z.string().url(),
+  DB_PASSWORD: z.string(),
+});
+
+// Produce a credential-free view for logs or metrics.
+const publicEnv = fullEnv.omit('DB_PASSWORD');
+
+console.log(publicEnv.data.PORT); // 3000
+console.log(publicEnv.data.DB_URL); // still validated
+// publicEnv.data.DB_PASSWORD does not exist and the key is removed from meta/camel/keys.
 ```
 
 ### Parse structured data from JSON env values
@@ -97,9 +154,12 @@ Every `Env` exposes:
 - `source`: the raw key/value record (defaults to `process.env`)
 - `meta`: frozen metadata per key (`name`, `val`, `raw`)
 - `data`: lazy getters for parsed values
+- `camel`: camelCase getters mirroring `data`
 - `keys`: literal map of declared keys
 
 > `fromValues` is designed for lightweight adapters: it preserves the provided strings and simply marks them optional. Reach for `fromSchema`/`fromZodObject` if you need typed parsing or cross-field validation.
+
+> Camel collisions: when multiple schema keys normalize to the same camelCase name, the first declaration wins and subsequent aliases fall back to the original key on `data`/`meta`.
 
 ## License
 

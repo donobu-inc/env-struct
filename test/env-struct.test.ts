@@ -9,6 +9,7 @@ describe('Env', () => {
       FEATURE_ENABLED: z.boolean(),
       CONFIG: z.object({ nested: z.string() }),
       OPTIONAL: z.string().optional(),
+      camelCased: z.string(),
     });
 
     const env = Env.fromZodObject(schema, {
@@ -16,6 +17,7 @@ describe('Env', () => {
       FEATURE_ENABLED: ' YeS ',
       CONFIG: ' { "nested": "value" } ',
       OPTIONAL: '  whitespace is preserved for string fields  ',
+      camelCased: 'alreadyCamel',
       EXTRA: 'This is not included in the schema but it should not cause a failure',
     });
 
@@ -24,6 +26,7 @@ describe('Env', () => {
       FEATURE_ENABLED: true,
       CONFIG: { nested: 'value' },
       OPTIONAL: '  whitespace is preserved for string fields  ',
+      camelCased: 'alreadyCamel',
     });
 
     expect(env.meta.PORT).toEqual({
@@ -40,11 +43,39 @@ describe('Env', () => {
       FEATURE_ENABLED: 'FEATURE_ENABLED',
       CONFIG: 'CONFIG',
       OPTIONAL: 'OPTIONAL',
+      camelCased: 'camelCased',
     });
 
     expect(Object.isFrozen(env.meta)).toBe(true);
     expect(Object.isFrozen(env.meta.PORT)).toBe(true);
     expect(Object.isFrozen(env.data)).toBe(true);
+    expect(Object.isFrozen(env.camel)).toBe(true);
+
+    expect(env.camel).toEqual({
+      port: 8080,
+      featureEnabled: true,
+      config: { nested: 'value' },
+      optional: '  whitespace is preserved for string fields  ',
+      camelCased: 'alreadyCamel',
+    });
+    expect(env.camel.featureEnabled).toBe(true);
+    expect(env.camel.camelCased).toBe('alreadyCamel');
+  });
+
+  it('camel accessor tolerates key collisions from snake/camel aliases', () => {
+    const schema = z.object({
+      FOO_BAR: z.string(),
+      fooBar: z.string().optional(),
+    });
+
+    const env = Env.fromZodObject(schema, {
+      FOO_BAR: 'fromSnake',
+      fooBar: 'fromCamel',
+    });
+
+    expect(env.data.FOO_BAR).toBe('fromSnake');
+    expect(env.data.fooBar).toBe('fromCamel');
+    expect(env.camel.fooBar).toBe('fromSnake');
   });
 
   it('supports constructing from a plain ZodRawShape', () => {
@@ -151,6 +182,87 @@ describe('Env', () => {
 
     const env = Env.fromZodObject(schema, { CONFIG: '{"nested":"value"}' });
     expect(env.data.CONFIG).toEqual({ nested: 'value' });
+  });
+
+  it('omits specified keys while preserving parsing and camel accessors', () => {
+    const base = Env.fromZodObject(
+      z.object({
+        PORT: z.number(),
+        TOKEN: z.string(),
+        OPTIONAL: z.string().optional(),
+      }),
+      {
+        PORT: '4200',
+        TOKEN: 'secret',
+        OPTIONAL: 'maybe',
+      },
+    );
+
+    const withoutToken = base.omit('TOKEN');
+
+    expect(withoutToken.data.PORT).toBe(4200);
+    expect(withoutToken.data.OPTIONAL).toBe('maybe');
+    expect('TOKEN' in withoutToken.data).toBe(false);
+    expect(withoutToken.meta.PORT.val).toBe(4200);
+    expect((withoutToken.data as any).TOKEN).toBeUndefined();
+    expect('TOKEN' in withoutToken.meta).toBe(false);
+    expect(withoutToken.source).toBe(base.source);
+    expect(withoutToken.keys).toEqual({
+      PORT: 'PORT',
+      OPTIONAL: 'OPTIONAL',
+    });
+    expect(withoutToken.camel).toEqual({
+      port: 4200,
+      optional: 'maybe',
+    });
+  });
+
+  it('throws when attempting to omit undeclared keys', () => {
+    const base = Env.fromZodObject(
+      z.object({
+        PORT: z.number(),
+      }),
+      {
+        PORT: '3000',
+      },
+    );
+
+    expect(() => base.omit('MISSING' as any)).toThrowError(
+      /Env\.omit\(\): attempted to omit undeclared key "MISSING"/,
+    );
+  });
+
+  it('continues to honour cross-field refinements for omit subsets', () => {
+    const schema = z
+      .object({
+        USERNAME: z.string(),
+        MIRROR: z.string(),
+      })
+      .superRefine((data, ctx) => {
+        if (data.USERNAME !== data.MIRROR) {
+          ctx.addIssue({
+            code: z.ZodIssueCode.custom,
+            path: ['MIRROR'],
+            message: 'mirror must match username',
+          });
+        }
+      });
+
+    const env = Env.fromZodObject(schema, {
+      USERNAME: 'admin',
+      MIRROR: 'admin',
+    });
+
+    const subset = env.omit('MIRROR');
+    expect(subset.data.USERNAME).toBe('admin');
+    expect('MIRROR' in subset.data).toBe(false);
+
+    expect(() =>
+      Env.fromZodObject(schema, {
+        USERNAME: 'admin',
+        MIRROR: 'other',
+      }).omit('MIRROR'),
+    ).toThrowError(/mirror must match username/);
   });
 
   it('preserves blank strings and distinguishes them from missing values', () => {
