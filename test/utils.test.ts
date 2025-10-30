@@ -53,6 +53,21 @@ describe('snakeToCamel', () => {
     expect(parsed.defaultValue).toBe('fallback');
   });
 
+  it('preserves default factories across conversion', () => {
+    let counter = 0;
+    const schema = z.object({
+      DYNAMIC_VALUE: z.string().default(() => `${++counter}`),
+    });
+
+    const camelSchema = snakeToCamel(schema);
+
+    const first = camelSchema.parse({});
+    const second = camelSchema.parse({});
+
+    expect(first.dynamicValue).toBe('1');
+    expect(second.dynamicValue).toBe('2');
+  });
+
   it('supports records, tuples, unions, intersections, and primitives', () => {
     const recordSchema = z.record(
       z.string(),

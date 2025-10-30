@@ -12,7 +12,7 @@ describe('Env', () => {
       camelCased: z.string(),
     });
 
-    const env = Env.fromZodObject(schema, {
+    const env = Env.fromZod(schema, {
       PORT: ' 8080 ',
       FEATURE_ENABLED: ' YeS ',
       CONFIG: ' { "nested": "value" } ',
@@ -68,7 +68,7 @@ describe('Env', () => {
       fooBar: z.string().optional(),
     });
 
-    const env = Env.fromZodObject(schema, {
+    const env = Env.fromZod(schema, {
       FOO_BAR: 'fromSnake',
       fooBar: 'fromCamel',
     });
@@ -147,7 +147,7 @@ describe('Env', () => {
       FLAG: z.boolean(),
     });
 
-    const env = Env.fromZodObject(schema, { FLAG: rawValue });
+    const env = Env.fromZod(schema, { FLAG: rawValue });
 
     expect(env.data.FLAG).toBe(expected);
     expect(env.meta.FLAG).toEqual({
@@ -162,7 +162,7 @@ describe('Env', () => {
       FLAG: z.boolean(),
     });
 
-    expect(() => Env.fromZodObject(schema, { FLAG: 'maybe' })).toThrow(ZodError);
+    expect(() => Env.fromZod(schema, { FLAG: 'maybe' })).toThrow(ZodError);
   });
 
   it('throws a ZodError when numeric fields contain non-numeric data', () => {
@@ -170,7 +170,7 @@ describe('Env', () => {
       PORT: z.number(),
     });
 
-    expect(() => Env.fromZodObject(schema, { PORT: 'not-a-number' })).toThrow(ZodError);
+    expect(() => Env.fromZod(schema, { PORT: 'not-a-number' })).toThrow(ZodError);
   });
 
   it('requires object-like fields to contain valid JSON', () => {
@@ -178,14 +178,14 @@ describe('Env', () => {
       CONFIG: z.object({ nested: z.string() }),
     });
 
-    expect(() => Env.fromZodObject(schema, { CONFIG: '{broken json' })).toThrow(ZodError);
+    expect(() => Env.fromZod(schema, { CONFIG: '{broken json' })).toThrow(ZodError);
 
-    const env = Env.fromZodObject(schema, { CONFIG: '{"nested":"value"}' });
+    const env = Env.fromZod(schema, { CONFIG: '{"nested":"value"}' });
     expect(env.data.CONFIG).toEqual({ nested: 'value' });
   });
 
   it('omits specified keys while preserving parsing and camel accessors', () => {
-    const base = Env.fromZodObject(
+    const base = Env.fromZod(
       z.object({
         PORT: z.number(),
         TOKEN: z.string(),
@@ -218,7 +218,7 @@ describe('Env', () => {
   });
 
   it('throws when attempting to omit undeclared keys', () => {
-    const base = Env.fromZodObject(
+    const base = Env.fromZod(
       z.object({
         PORT: z.number(),
       }),
@@ -248,7 +248,7 @@ describe('Env', () => {
         }
       });
 
-    const env = Env.fromZodObject(schema, {
+    const env = Env.fromZod(schema, {
       USERNAME: 'admin',
       MIRROR: 'admin',
     });
@@ -258,7 +258,7 @@ describe('Env', () => {
     expect('MIRROR' in subset.data).toBe(false);
 
     expect(() =>
-      Env.fromZodObject(schema, {
+      Env.fromZod(schema, {
         USERNAME: 'admin',
         MIRROR: 'other',
       }).omit('MIRROR'),
@@ -271,7 +271,7 @@ describe('Env', () => {
       ALSO_OPTIONAL: z.number().optional(),
     });
 
-    const withBlankString = Env.fromZodObject(schema, {
+    const withBlankString = Env.fromZod(schema, {
       OPTIONAL: '   ',
     });
     expect(withBlankString.data.OPTIONAL).toBe('   ');
@@ -279,12 +279,12 @@ describe('Env', () => {
     expect(withBlankString.data.ALSO_OPTIONAL).toBeUndefined();
 
     expect(() =>
-      Env.fromZodObject(schema, {
+      Env.fromZod(schema, {
         ALSO_OPTIONAL: '',
       }),
     ).toThrow(ZodError);
 
-    const missing = Env.fromZodObject(schema, {});
+    const missing = Env.fromZod(schema, {});
     expect(missing.data.OPTIONAL).toBeUndefined();
     expect(missing.data.ALSO_OPTIONAL).toBeUndefined();
     expect(missing.meta.OPTIONAL.raw).toBeUndefined();
@@ -296,7 +296,7 @@ describe('Env', () => {
       ANYTHING: z.any(),
     });
 
-    const env = Env.fromZodObject(schema, { ANYTHING: '{"answer":42}' });
+    const env = Env.fromZod(schema, { ANYTHING: '{"answer":42}' });
 
     expect(env.data.ANYTHING).toEqual({ answer: 42 });
     expect(env.meta.ANYTHING.raw).toBe('{"answer":42}');
@@ -307,7 +307,7 @@ describe('Env', () => {
       FLAG: z.enum(['true', 'false']),
     });
 
-    const env = Env.fromZodObject(schema, { FLAG: 'true' });
+    const env = Env.fromZod(schema, { FLAG: 'true' });
 
     expect(env.data.FLAG).toBe('true');
     expect(env.meta.FLAG.raw).toBe('true');
@@ -346,7 +346,7 @@ describe('Env', () => {
         }),
       );
 
-    const env = Env.fromZodObject(schema, {
+    const env = Env.fromZod(schema, {
       FLAG: 'enabled',
       SECRET: 'shh',
     });
@@ -377,15 +377,32 @@ describe('Env', () => {
       expect(env.data.HOST).toBe(' example.com ');
     });
 
-    it('creates an Env via fromZodObject', () => {
+    it('creates an Env via fromZod', () => {
       const schema = z.object({
         API_KEY: z.string(),
       });
 
-      const env = Env.fromZodObject(schema, { API_KEY: 'secret' });
+      const env = Env.fromZod(schema, { API_KEY: 'secret' });
 
       expect(env.data.API_KEY).toBe('secret');
       expect(env.schema).toBe(schema);
+    });
+
+    it('creates an Env via fromZod using a raw schema shape', () => {
+      const env = Env.fromZod(
+        {
+          PORT: z.number(),
+          HOST: z.string(),
+        },
+        {
+          PORT: '7000',
+          HOST: ' example.net ',
+        },
+      );
+
+      expect(env.data.PORT).toBe(7000);
+      expect(env.data.HOST).toBe(' example.net ');
+      expect(env.schema.shape.PORT).toBeDefined();
     });
 
     it('creates an Env via fromNames', () => {
@@ -397,6 +414,34 @@ describe('Env', () => {
       expect(env.data.FOO).toBe(' value ');
       expect(env.data.BAR).toBe('other');
       expect(env.schema.shape.FOO).toBeDefined();
+    });
+
+    it('creates an Env via fromZod with transformed outputs', () => {
+      const schema = z
+        .object({
+          PORT: z.string().min(1),
+          API_KEY: z.string().transform((val) => val.trim()),
+        })
+        .transform((data) => ({
+          PORT: Number(data.PORT),
+          API_KEY: data.API_KEY,
+        }));
+
+      const env = Env.fromZod(schema, {
+        PORT: '8080',
+        API_KEY: '  secret  ',
+      });
+
+      expect(env.data.PORT).toBe(8080);
+      expect(env.meta.PORT).toEqual({
+        name: 'PORT',
+        val: 8080,
+        raw: '8080',
+      });
+      expect(env.data.API_KEY).toBe('secret');
+      expect(env.meta.API_KEY.val).toBe('secret');
+      expect(env.camel.port).toBe(8080);
+      expect(env.schema.shape.PORT).toBeDefined();
     });
 
     it('infers schema from values via fromValues', () => {

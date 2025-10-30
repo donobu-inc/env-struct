@@ -84,7 +84,13 @@ export function snakeToCamel<T extends z.ZodTypeAny>(schema: T): SnakeToCamelSch
   // Handle ZodDefault
   if (schema instanceof z.ZodDefault) {
     const innerSchema = snakeToCamel(schema.removeDefault());
-    return innerSchema.default(schema._def.defaultValue()) as SnakeToCamelSchema<T>;
+    const defaultFactory = () => {
+      const def = (schema._def as { defaultValue: unknown }).defaultValue;
+      return typeof def === 'function' ? (def as () => unknown)() : def;
+    };
+    return innerSchema.default(
+      defaultFactory as () => z.input<typeof innerSchema>,
+    ) as SnakeToCamelSchema<T>;
   }
 
   // Handle ZodRecord

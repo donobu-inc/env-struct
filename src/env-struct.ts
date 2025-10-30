@@ -1,4 +1,5 @@
-import { z, ZodObject, ZodRawShape, ZodType } from 'zod/v4';
+import { z } from 'zod/v4';
+import type { ZodObject, ZodRawShape, ZodType } from 'zod/v4';
 
 export type EnvSource = Record<string, string | undefined>;
 
@@ -38,14 +39,27 @@ export interface EnvVar<TValue, TName extends string> {
   readonly raw: string | undefined;
 }
 
-type MetaByKey<S extends ZodRawShape> = Readonly<{
-  [K in keyof S & string]: EnvVar<InferEnv<S>[K], K>;
+type ZodTypeAny = z.ZodType<any, any, any>;
+type ZodRecordSchema = z.ZodType<Record<string, unknown>, any, any>;
+
+type ParsedRecord<S extends ZodRawShape> = {
+  [K in keyof S & string]: unknown;
+};
+
+type ParserOutputForSchema<S extends ZodRawShape, TSchema extends ZodRecordSchema> = {
+  [K in keyof S & string]: (z.output<TSchema> & Record<string, unknown>)[K];
+};
+
+type DefaultParsed<S extends ZodRawShape> = {
+  [K in keyof S & string]: z.infer<S[K]>;
+};
+
+type MetaByKey<S extends ZodRawShape, Parsed extends ParsedRecord<S>> = Readonly<{
+  [K in keyof S & string]: EnvVar<Parsed[K], K>;
 }>;
 
 /** Readonly view into parsed env variable values. */
-type DataAccessor<S extends ZodRawShape> = {
-  readonly [K in keyof S & string]: InferEnv<S>[K];
-};
+type DataAccessor<S extends ZodRawShape, Parsed extends ParsedRecord<S>> = Readonly<Parsed>;
 
 type NormalizePlain<S extends string> = S extends Uppercase<S> ? Lowercase<S> : S;
 
@@ -54,19 +68,32 @@ type SnakeToCamelCase<S extends string> = S extends `${infer Head}_${infer Tail}
   : NormalizePlain<S>;
 
 /** Readonly camelCase view into parsed env variable values. */
-type CamelDataAccessor<S extends ZodRawShape> = {
-  readonly [K in keyof S & string as SnakeToCamelCase<K>]: InferEnv<S>[K];
-};
+type CamelDataAccessor<S extends ZodRawShape, Parsed extends ParsedRecord<S>> = Readonly<{
+  [K in keyof S & string as SnakeToCamelCase<K>]: Parsed[K];
+}>;
 
 type EnvVarNames<S extends ZodRawShape> = Readonly<{
   [K in keyof S & string]: K;
 }>;
 
-export type EnvShapeOf<TEnv extends Env<any>> = TEnv extends Env<infer S> ? S : never;
+type PickShape<S extends ZodRawShape, Keys extends keyof S & string> = {
+  [K in Keys]: S[K];
+};
 
-export type EnvPick<TEnv extends Env<any>, Keys extends keyof EnvShapeOf<TEnv> & string> = Env<{
-  [K in Keys]: EnvShapeOf<TEnv>[K];
-}>;
+type PickParsed<Parsed extends Record<string, unknown>, Keys extends keyof Parsed & string> = {
+  [K in Keys]: Parsed[K];
+};
+
+export type EnvShapeOf<TEnv extends EnvImpl<any, any>> =
+  TEnv extends EnvImpl<infer S, any> ? S : never;
+
+export type EnvParsedOf<TEnv extends EnvImpl<any, any>> =
+  TEnv extends EnvImpl<any, infer Parsed> ? Parsed : never;
+
+export type EnvPick<
+  TEnv extends EnvImpl<any, any>,
+  Keys extends keyof EnvShapeOf<TEnv> & string,
+> = EnvImpl<PickShape<EnvShapeOf<TEnv>, Keys>, PickParsed<EnvParsedOf<TEnv>, Keys>>;
 
 /** Resolve a default env source that works in Node and non-Node runtimes. */
 const getDefaultEnvSource = (): EnvSource => {
@@ -81,32 +108,40 @@ const getDefaultEnvSource = (): EnvSource => {
  * - Validation happens on construction; throws ZodError on failure.
  * - Ergonomics: `env.data` exposes parsed values directly, `env.meta.MY_VAR.val` for individual access.
  */
-class EnvImpl<S extends ZodRawShape> {
+class EnvImpl<S extends ZodRawShape, Parsed extends ParsedRecord<S> = DefaultParsed<S>> {
   /** Whole-object schema used for validation. */
   public readonly schema: ZodObject<S>;
+  /** Parser that may wrap the base schema (e.g. via transform). */
+  private readonly parser: ZodRecordSchema;
   /** Raw env-var source. */
   public readonly source: EnvSource;
   /** Per-key metadata including parsed and raw values. */
-  public readonly meta: MetaByKey<S>;
+  public readonly meta: MetaByKey<S, Parsed>;
   /** Direct value access keyed by env var name. */
-  public readonly data: DataAccessor<S>;
+  public readonly data: DataAccessor<S, Parsed>;
   /** Direct value access keyed by camelCase env var name (best-effort; collisions prefer first key). */
-  public readonly camel: CamelDataAccessor<S>;
+  public readonly camel: CamelDataAccessor<S, Parsed>;
   /** Declared environment variable names preserved as a literal map. */
   public readonly keys: EnvVarNames<S>;
 
-  private constructor(schema: ZodObject<S>, source: EnvSource = getDefaultEnvSource()) {
+  private constructor(
+    schema: ZodObject<S>,
+    source: EnvSource | undefined,
+    parser: ZodRecordSchema,
+  ) {
     this.schema = schema;
-    this.source = source;
+    this.parser = parser;
+    this.source = source ?? getDefaultEnvSource();
     const declaredKeys = Object.keys(this.schema.shape) as Array<keyof S & string>;
     this.keys = createEnvVarNames(declaredKeys as readonly (keyof S & string)[]);
     // Build candidates from raw strings with minimal coercion.
-    const { parsed, rawByKey } = buildValues(this.schema, this.source);
+    const { parsed, rawByKey } = buildValues<S, Parsed>(this.schema, this.parser, this.source);
+    const parsedValues = parsed;
     // Capture parsed values while building frozen metadata containers.
     const metaByKey = {} as {
-      [K in keyof S & string]: EnvVar<InferEnv<S>[K], K>;
+      [K in keyof S & string]: EnvVar<Parsed[K], K>;
     };
-    const dataAccessor = {} as DataAccessor<S>;
+    const dataAccessor = {} as DataAccessor<S, Parsed>;
     // `camel` mirrors the parsed values but exposes camelCase property names for convenience.
     // We keep this as a plain object so we can wire lazy getters that share the same parsed cache.
     const camelAccessor: Record<string, unknown> = {};
@@ -114,12 +149,12 @@ class EnvImpl<S extends ZodRawShape> {
     for (const key of declaredKeys) {
       metaByKey[key] = Object.freeze({
         name: key,
-        val: (parsed as any)[key],
+        val: parsedValues[key],
         raw: rawByKey[key],
       });
       Object.defineProperty(dataAccessor, key, {
         enumerable: true,
-        get: () => (parsed as any)[key],
+        get: () => parsedValues[key],
       });
       const camelKey = snakeToCamelKey(key);
       // If two schema keys normalize to the same camelCase form, prefer the first declaration.
@@ -129,13 +164,13 @@ class EnvImpl<S extends ZodRawShape> {
       }
       Object.defineProperty(camelAccessor, camelKey, {
         enumerable: true,
-        get: () => (parsed as any)[key],
+        get: () => parsedValues[key],
       });
     }
 
-    this.meta = Object.freeze(metaByKey) as MetaByKey<S>;
+    this.meta = Object.freeze(metaByKey) as MetaByKey<S, Parsed>;
     this.data = Object.freeze(dataAccessor);
-    this.camel = Object.freeze(camelAccessor) as CamelDataAccessor<S>;
+    this.camel = Object.freeze(camelAccessor) as CamelDataAccessor<S, Parsed>;
   }
 
   /**
@@ -143,7 +178,7 @@ class EnvImpl<S extends ZodRawShape> {
    */
   public pick<const Keys extends readonly (keyof S & string)[]>(
     ...keys: Keys
-  ): Env<{ [K in Keys[number]]: S[K] }> {
+  ): EnvImpl<PickShape<S, Keys[number]>, PickParsed<Parsed, Keys[number]>> {
     // Build a Zod pick mask keyed by the original schema names. We use a partial
     // record so the compiler accepts extra keys beyond the exact subset literal.
     const mask: Partial<Record<keyof S & string, true>> = {};
@@ -216,7 +251,10 @@ class EnvImpl<S extends ZodRawShape> {
       );
     }
 
-    return EnvImpl.fromZodObject(subsetSchema, this.source);
+    return EnvImpl.fromZodObject(subsetSchema, this.source) as EnvImpl<
+      PickShape<S, Keys[number]>,
+      PickParsed<Parsed, Keys[number]>
+    >;
   }
 
   /**
@@ -225,7 +263,10 @@ class EnvImpl<S extends ZodRawShape> {
    */
   public omit<const Keys extends readonly (keyof S & string)[]>(
     ...keys: Keys
-  ): Env<{ [K in Exclude<keyof S & string, Keys[number]>]: S[K] }> {
+  ): EnvImpl<
+    PickShape<S, Exclude<keyof S & string, Keys[number]>>,
+    PickParsed<Parsed, Exclude<keyof S & string, Keys[number]>>
+  > {
     const declaredKeys = Object.keys(this.schema.shape) as Array<keyof S & string>;
     const declaredSet = new Set(declaredKeys);
 
@@ -239,19 +280,42 @@ class EnvImpl<S extends ZodRawShape> {
     const kept = declaredKeys.filter((key) => !omitSet.has(key));
 
     const picked = this.pick(...(kept as readonly (keyof S & string)[]));
-    return picked as Env<{ [K in Exclude<keyof S & string, Keys[number]>]: S[K] }>;
+    return picked as unknown as EnvImpl<
+      PickShape<S, Exclude<keyof S & string, Keys[number]>>,
+      PickParsed<Parsed, Exclude<keyof S & string, Keys[number]>>
+    >;
   }
 
+  public static fromZod<const Shape extends ZodRawShape>(
+    schema: Shape,
+    source?: EnvSource,
+  ): EnvImpl<Shape, DefaultParsed<Shape>>;
+  public static fromZod<TSchema extends ZodRecordSchema>(
+    schema: TSchema,
+    source?: EnvSource,
+  ): EnvImpl<InferSchemaShape<TSchema>, ParserOutputForSchema<InferSchemaShape<TSchema>, TSchema>>;
+  public static fromZod(
+    schema: ZodRecordSchema | ZodRawShape,
+    source?: EnvSource,
+  ): EnvImpl<any, any> {
+    if (isZodType(schema)) {
+      return EnvImpl.fromZodSchema(schema as ZodRecordSchema, source);
+    }
+
+    return EnvImpl.fromRawShape(schema as ZodRawShape, source);
+  }
+
+  /** @deprecated Use `Env.fromZod()` instead. */
   public static fromSchema<S extends ZodRawShape>(schema: S, source?: EnvSource): Env<S> {
-    const zodSchema = z.object(schema);
-    return new EnvImpl(zodSchema, source);
+    return EnvImpl.fromZod(schema, source) as Env<S>;
   }
 
+  /** @deprecated Use `Env.fromZod()` instead. */
   public static fromZodObject<S extends ZodRawShape>(
     schema: ZodObject<S>,
     source?: EnvSource,
-  ): Env<S> {
-    return new EnvImpl(schema, source);
+  ): EnvImpl<S, ParserOutputForSchema<S, typeof schema>> {
+    return EnvImpl.fromZod(schema, source);
   }
 
   public static fromNames<const Names extends readonly string[]>(
@@ -259,7 +323,7 @@ class EnvImpl<S extends ZodRawShape> {
     source?: EnvSource,
   ): Env<EnvShapeFromNames<Names>> {
     const schema = buildSchemaFromNames(names);
-    return new EnvImpl<EnvShapeFromNames<Names>>(schema, source);
+    return new EnvImpl<EnvShapeFromNames<Names>>(schema, source, schema);
   }
 
   public static fromValues<const Source extends EnvSource>(
@@ -268,16 +332,42 @@ class EnvImpl<S extends ZodRawShape> {
     const names = Object.keys(values) as (keyof Source & string)[];
     const schema = buildSchemaFromNames(names as readonly (keyof Source & string)[]);
 
-    return new EnvImpl(schema, values);
+    return new EnvImpl(schema, values, schema);
+  }
+
+  private static fromRawShape<S extends ZodRawShape>(
+    schema: S,
+    source?: EnvSource,
+  ): EnvImpl<S, DefaultParsed<S>> {
+    const zodSchema = z.object(schema);
+    return new EnvImpl<S, DefaultParsed<S>>(zodSchema, source, zodSchema);
+  }
+
+  private static fromZodSchema<TSchema extends ZodRecordSchema>(
+    schema: TSchema,
+    source?: EnvSource,
+  ): EnvImpl<InferSchemaShape<TSchema>, ParserOutputForSchema<InferSchemaShape<TSchema>, TSchema>> {
+    const objectSchema = resolveObjectSchema(schema) as ZodObject<InferSchemaShape<TSchema>>;
+    return new EnvImpl<
+      InferSchemaShape<TSchema>,
+      ParserOutputForSchema<InferSchemaShape<TSchema>, TSchema>
+    >(objectSchema, source, schema);
   }
 }
 
 export const Env = EnvImpl;
-export type Env<S extends ZodRawShape> = EnvImpl<S>;
+export type Env<S extends ZodRawShape, Parsed extends ParsedRecord<S> = DefaultParsed<S>> = EnvImpl<
+  S,
+  Parsed
+>;
 
 /* ---------------- Internal, opinionated parsing ---------------- */
 
-function buildValues<S extends ZodRawShape>(schema: ZodObject<S>, source: EnvSource) {
+function buildValues<S extends ZodRawShape, Parsed extends ParsedRecord<S>>(
+  schema: ZodObject<S>,
+  parser: ZodRecordSchema,
+  source: EnvSource,
+) {
   const shape = schema.shape as unknown as Record<string, ZodType | undefined>;
   const rawByKey: Record<string, string | undefined> = {};
   const candidate: Record<string, unknown> = {};
@@ -290,7 +380,7 @@ function buildValues<S extends ZodRawShape>(schema: ZodObject<S>, source: EnvSou
   }
 
   // Enforce field-level and cross-field rules. Let ZodError bubble.
-  const parsed = schema.parse(candidate) as InferEnv<S>;
+  const parsed = parser.parse(candidate) as Parsed;
   return { parsed, rawByKey };
 }
 
@@ -383,16 +473,25 @@ function unwrapType(schema: ZodType | undefined): ZodType | undefined {
     if (
       typeName === 'ZodEffects' ||
       typeName === 'effects' ||
+      typeName === 'transform' ||
       typeName === 'ZodBranded' ||
       typeName === 'branded'
     ) {
-      current = def?.schema;
-      continue;
+      const next = def?.schema;
+      if (next) {
+        current = next;
+        continue;
+      }
+      break;
     }
 
-    if (typeName === 'ZodPipeline' || typeName === 'pipeline') {
-      current = def?.out;
-      continue;
+    if (typeName === 'ZodPipeline' || typeName === 'pipeline' || typeName === 'pipe') {
+      const next = (def as { in?: ZodType | undefined })?.in ?? def?.out;
+      if (next) {
+        current = next;
+        continue;
+      }
+      break;
     }
 
     break;
@@ -434,6 +533,12 @@ function mustJsonParse(s: string): unknown {
   }
 }
 
+function isZodType(value: unknown): value is ZodTypeAny {
+  return (
+    typeof value === 'object' && value !== null && typeof (value as ZodTypeAny).parse === 'function'
+  );
+}
+
 function buildSchemaFromNames<const Names extends readonly string[]>(
   names: Names,
 ): ZodObject<EnvShapeFromNames<Names>> {
@@ -453,4 +558,39 @@ function snakeToCamelKey(key: string): string {
   }
 
   return key === key.toUpperCase() ? key.toLowerCase() : key;
+}
+
+type InferSchemaShape<TSchema extends ZodTypeAny> =
+  TSchema extends z.ZodObject<infer Shape>
+    ? Shape
+    : TSchema extends { _def: { innerType: infer Inner } }
+      ? Inner extends ZodTypeAny
+        ? InferSchemaShape<Inner>
+        : never
+      : TSchema extends { _def: { schema: infer Inner } }
+        ? Inner extends ZodTypeAny
+          ? InferSchemaShape<Inner>
+          : never
+        : TSchema extends { _def: { in: infer Inner } }
+          ? Inner extends ZodTypeAny
+            ? InferSchemaShape<Inner>
+            : never
+          : TSchema extends { _def: { out: infer Inner } }
+            ? Inner extends ZodTypeAny
+              ? InferSchemaShape<Inner>
+              : never
+            : never;
+
+function resolveObjectSchema(schema: ZodRecordSchema): ZodObject<any> {
+  const base = unwrapType(schema);
+  if (base instanceof z.ZodObject) {
+    return base;
+  }
+  const typeName = getTypeTag(base?._def);
+
+  if (!base || (typeName !== 'ZodObject' && typeName !== 'object')) {
+    throw new Error('Env.fromZod(): schema must ultimately resolve to a ZodObject');
+  }
+
+  return base as ZodObject<any>;
 }

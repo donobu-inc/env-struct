@@ -38,8 +38,8 @@ const schema = {
       docs: 'https://docs.example.com',
     }),
 };
-
-const env = Env.fromSchema(schema); // defaults to process.env
+// The data source defaults to process.env
+const env = Env.fromZod(schema);
 
 console.log(env.data.PORT); // parsed number (lazy getter)
 console.log(env.meta.FEATURE_FLAG); // { name, val, raw }
@@ -55,7 +55,7 @@ console.log(env.data.ROUTES.api); // structured field stays parsed
 import { z } from 'zod/v4';
 import { Env } from 'env-struct';
 
-const env = Env.fromSchema({
+const env = Env.fromZod({
   API_URL: z.string().url(),
   FEATURE_FLAG: z.enum(['on', 'off']).default('off'),
 });
@@ -82,7 +82,7 @@ console.log(httpConfig.apiUrl); // camelCase key ready for other modules
 import { z } from 'zod/v4';
 import { Env } from 'env-struct';
 
-const base = Env.fromSchema({
+const base = Env.fromZod({
   PORT: z.number().default(3000),
   FEATURE_FLAG: z.enum(['on', 'off', 'beta']).default('off'),
   DB_URL: z.string().url(),
@@ -103,7 +103,7 @@ serve({
 import { z } from 'zod/v4';
 import { Env } from 'env-struct';
 
-const fullEnv = Env.fromSchema({
+const fullEnv = Env.fromZod({
   PORT: z.number().default(3000),
   DB_URL: z.string().url(),
   DB_PASSWORD: z.string(),
@@ -130,7 +130,7 @@ const schema = {
     .default([{ name: 'email', concurrency: 2 }]),
 };
 
-const env = Env.fromSchema(schema, {
+const env = Env.fromZod(schema, {
   SERVICE_ROUTES:
     '{"auth":"https://api.example.com/auth","billing":"https://api.example.com/billing"}',
   WORKERS: '[{"name":"email","concurrency":4},{"name":"cleanup","concurrency":1}]',
@@ -142,22 +142,24 @@ const workerNames = env.data.WORKERS.map((worker) => worker.name);
 
 ## API overview
 
-- `Env.fromSchema(shape, source?)` – build from a Zod raw shape
-- `Env.fromZodObject(zodObject, source?)` – reuse an existing `z.object`
-- `Env.fromNames(names, source?)` – treat listed names as optional strings
-- `Env.fromValues(record)` – infer optional string fields from a raw record (no coercion)
-- `env.pick(...keys)` – derive a narrowed `Env` with the same source
+- `Env.fromZod(shapeOrSchema, source?)` - Build from a Zod schema (transforms supported).
+- `Env.fromNames(names, source?)` - Treat listed names as optional strings.
+- `Env.fromValues(record)` - Infer optional string fields from a raw record (no coercion).
+- `env.pick(...keys)` - Derive a narrowed `Env` with the same source.
+- `env.omit(...keys)` - Derive a narrowed `Env` with the same source.
 
 Every `Env` exposes:
 
-- `schema`: the backing `z.object`
-- `source`: the raw key/value record (defaults to `process.env`)
-- `meta`: frozen metadata per key (`name`, `val`, `raw`)
-- `data`: lazy getters for parsed values
-- `camel`: camelCase getters mirroring `data`
-- `keys`: literal map of declared keys
+- `schema`: The backing `z.object`.
+- `source`: The raw key/value record (defaults to `process.env`).
+- `meta`: Frozen metadata per key (`name`, `val`, `raw`).
+- `data`: Lazy getters for parsed values.
+- `camel`: camelCase getters mirroring `data`.
+- `keys`: Literal map of declared keys.
 
-> `fromValues` is designed for lightweight adapters: it preserves the provided strings and simply marks them optional. Reach for `fromSchema`/`fromZodObject` if you need typed parsing or cross-field validation.
+> `fromValues` is designed for lightweight adapters: it preserves the provided strings and simply marks them optional. Reach for `fromZod` if you need typed parsing or cross-field validation.
+
+> `Env.fromSchema` and `Env.fromZodObject` remain available as deprecated aliases of `Env.fromZod` for backward compatibility.
 
 > Camel collisions: when multiple schema keys normalize to the same camelCase name, the first declaration wins and subsequent aliases fall back to the original key on `data`/`meta`.
 
