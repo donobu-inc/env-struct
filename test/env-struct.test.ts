@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, expectTypeOf, it } from 'vitest';
 import { z, ZodError, ZodObject } from 'zod/v4';
 import { Env } from '../src';
 
@@ -442,6 +442,55 @@ describe('Env', () => {
       expect(env.meta.API_KEY.val).toBe('secret');
       expect(env.camel.port).toBe(8080);
       expect(env.schema.shape.PORT).toBeDefined();
+    });
+
+    it('reflects transform additions, removals, and type changes in accessors', () => {
+      const schema = z
+        .object({
+          COUNT: z.string(),
+          OPTIONAL_FLAG: z.string().optional(),
+          REMOVE_ME: z.string(),
+        })
+        .transform((input) => {
+          const count = Number(input.COUNT);
+          return {
+            COUNT: count,
+            ADDED_FIELD: `count:${count}`,
+            OPTIONAL_FLAG: input.OPTIONAL_FLAG ? true : false,
+          };
+        });
+
+      const env = Env.fromZod(schema, {
+        COUNT: '42',
+        REMOVE_ME: 'this-will-be-removed',
+      });
+
+      expect(env.data.COUNT).toBe(42);
+      expect(env.data.ADDED_FIELD).toBe('count:42');
+      expect(env.data.OPTIONAL_FLAG).toBe(false);
+      expectTypeOf<
+        'REMOVE_ME' extends keyof typeof env.data ? true : false
+      >().toEqualTypeOf<false>();
+      expect((env.data as any)['REMOVE_ME']).toBeUndefined();
+      expect(env.camel.count).toBe(42);
+      expect(env.camel.addedField).toBe('count:42');
+      expect(env.camel.optionalFlag).toBe(false);
+
+      type ExpectedCamel = {
+        readonly count: number;
+        readonly addedField: string;
+        readonly optionalFlag: boolean;
+      };
+
+      expectTypeOf(env.camel).toEqualTypeOf<ExpectedCamel>();
+
+      type ExpectedData = {
+        readonly COUNT: number;
+        readonly OPTIONAL_FLAG: boolean;
+        readonly ADDED_FIELD: string;
+      };
+
+      expectTypeOf(env.data).toEqualTypeOf<ExpectedData>();
     });
 
     it('infers schema from values via fromValues', () => {

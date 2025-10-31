@@ -1,125 +1,53 @@
-import { z } from 'zod';
+type Primitive = string | number | boolean | bigint | symbol | null | undefined;
 
 /**
- * Type-level string conversion from SNAKE_CASE to camelCase
+ * Lowercase all-caps strings while leaving mixed-case names intact.
+ * This mirrors the runtime casing logic used by `Env.fromZod().camel`.
  */
-type SnakeToCamel<S extends string> = S extends `${infer T}_${infer U}`
-  ? `${Lowercase<T>}${Capitalize<SnakeToCamel<U>>}`
-  : Lowercase<S>;
+type NormalizePlain<S extends string> = S extends Uppercase<S> ? Lowercase<S> : S;
 
 /**
- * Recursively convert object shape keys from snake_case to camelCase at type level
+ * Type-level string conversion from `SNAKE_CASE` (or all-caps) to `camelCase`.
  */
-type SnakeToCamelShape<T extends z.ZodRawShape> = {
-  [K in keyof T as K extends string ? SnakeToCamel<K> : K]: T[K] extends z.ZodObject<
-    infer S extends z.ZodRawShape
-  >
-    ? z.ZodObject<SnakeToCamelShape<S>>
-    : T[K] extends z.ZodArray<infer E>
-      ? z.ZodArray<SnakeToCamelSchema<E>>
-      : T[K] extends z.ZodOptional<infer O>
-        ? z.ZodOptional<SnakeToCamelSchema<O>>
-        : T[K] extends z.ZodNullable<infer N>
-          ? z.ZodNullable<SnakeToCamelSchema<N>>
-          : T[K] extends z.ZodDefault<infer D>
-            ? z.ZodDefault<SnakeToCamelSchema<D>>
-            : T[K];
+export type SnakeToCamelKey<S extends string> = S extends `${infer Head}_${infer Tail}`
+  ? `${Lowercase<Head>}${Tail extends '' ? '' : Capitalize<SnakeToCamelKey<Tail>>}`
+  : NormalizePlain<S>;
+
+/**
+ * Recursively camel-case keys and nested values.
+ */
+type SnakeToCamelObject<T> = {
+  readonly [K in keyof T as K extends string ? SnakeToCamelKey<K> : K]: snakeToCamel<T[K]>;
+};
+
+type SnakeToCamelArray<T extends readonly unknown[]> = {
+  [K in keyof T]: snakeToCamel<T[K]>;
 };
 
 /**
- * Type-level conversion for any Zod schema
+ * Recursively convert keys on arbitrary structures from `SNAKE_CASE` (or ALL_CAPS) to `camelCase`.
+ * Designed for `z.infer` outputs, but works with any nested object, array, map, or promise.
  */
-type SnakeToCamelSchema<T extends z.ZodTypeAny> =
-  T extends z.ZodObject<infer S extends z.ZodRawShape>
-    ? z.ZodObject<SnakeToCamelShape<S>>
-    : T extends z.ZodArray<infer E>
-      ? z.ZodArray<SnakeToCamelSchema<E>>
-      : T extends z.ZodOptional<infer O>
-        ? z.ZodOptional<SnakeToCamelSchema<O>>
-        : T extends z.ZodNullable<infer N>
-          ? z.ZodNullable<SnakeToCamelSchema<N>>
-          : T extends z.ZodDefault<infer D>
-            ? z.ZodDefault<SnakeToCamelSchema<D>>
-            : T;
-
-/**
- * Runtime string conversion from SNAKE_CASE to camelCase
- */
-function convertSnakeToCamel(str: string): string {
-  return str.toLowerCase().replace(/_([a-z])/g, (_, letter) => letter.toUpperCase());
-}
-
-/**
- * Recursively converts a Zod schema's field names from SNAKE_CASE to camelCase
- */
-export function snakeToCamel<T extends z.ZodTypeAny>(schema: T): SnakeToCamelSchema<T> {
-  // Handle ZodObject
-  if (schema instanceof z.ZodObject) {
-    const shape = schema.shape;
-    const newShape: Record<string, z.ZodTypeAny> = {};
-
-    for (const [key, value] of Object.entries(shape)) {
-      const camelKey = convertSnakeToCamel(key);
-      newShape[camelKey] = snakeToCamel(value as z.ZodTypeAny);
-    }
-
-    return z.object(newShape) as SnakeToCamelSchema<T>;
-  }
-
-  // Handle ZodArray
-  if (schema instanceof z.ZodArray) {
-    return z.array(snakeToCamel(schema.element)) as SnakeToCamelSchema<T>;
-  }
-
-  // Handle ZodOptional
-  if (schema instanceof z.ZodOptional) {
-    return snakeToCamel(schema.unwrap()).optional() as SnakeToCamelSchema<T>;
-  }
-
-  // Handle ZodNullable
-  if (schema instanceof z.ZodNullable) {
-    return snakeToCamel(schema.unwrap()).nullable() as SnakeToCamelSchema<T>;
-  }
-
-  // Handle ZodDefault
-  if (schema instanceof z.ZodDefault) {
-    const innerSchema = snakeToCamel(schema.removeDefault());
-    const defaultFactory = () => {
-      const def = (schema._def as { defaultValue: unknown }).defaultValue;
-      return typeof def === 'function' ? (def as () => unknown)() : def;
-    };
-    return innerSchema.default(
-      defaultFactory as () => z.input<typeof innerSchema>,
-    ) as SnakeToCamelSchema<T>;
-  }
-
-  // Handle ZodRecord
-  if (schema instanceof z.ZodRecord) {
-    const keySchema = schema._def.keyType;
-    const valueSchema = schema._def.valueType;
-    return z.record(keySchema, snakeToCamel(valueSchema)) as unknown as SnakeToCamelSchema<T>;
-  }
-
-  // Handle ZodTuple
-  if (schema instanceof z.ZodTuple) {
-    const items = schema._def.items.map((item: z.ZodTypeAny) => snakeToCamel(item));
-    return z.tuple(items as any) as unknown as SnakeToCamelSchema<T>;
-  }
-
-  // Handle ZodUnion
-  if (schema instanceof z.ZodUnion) {
-    const options = schema._def.options.map((option: z.ZodTypeAny) => snakeToCamel(option));
-    return z.union(options as any) as unknown as SnakeToCamelSchema<T>;
-  }
-
-  // Handle ZodIntersection
-  if (schema instanceof z.ZodIntersection) {
-    return z.intersection(
-      snakeToCamel(schema._def.left),
-      snakeToCamel(schema._def.right),
-    ) as unknown as SnakeToCamelSchema<T>;
-  }
-
-  // For all other types (primitives, etc.), return as-is
-  return schema as SnakeToCamelSchema<T>;
-}
+export type snakeToCamel<T> = T extends Primitive
+  ? T
+  : T extends (...args: any[]) => unknown
+    ? T
+    : T extends Promise<infer U>
+      ? Promise<snakeToCamel<U>>
+      : T extends Map<infer K, infer V>
+        ? Map<snakeToCamel<K>, snakeToCamel<V>>
+        : T extends ReadonlyMap<infer K, infer V>
+          ? ReadonlyMap<snakeToCamel<K>, snakeToCamel<V>>
+          : T extends Set<infer Item>
+            ? Set<snakeToCamel<Item>>
+            : T extends ReadonlySet<infer Item>
+              ? ReadonlySet<snakeToCamel<Item>>
+              : T extends WeakMap<infer K, infer V>
+                ? WeakMap<K, snakeToCamel<V>>
+                : T extends WeakSet<infer Item>
+                  ? WeakSet<Item>
+                  : T extends readonly unknown[]
+                    ? SnakeToCamelArray<T>
+                    : T extends object
+                      ? SnakeToCamelObject<T>
+                      : T;

@@ -1,5 +1,6 @@
 import { z } from 'zod/v4';
 import type { ZodObject, ZodRawShape, ZodType } from 'zod/v4';
+import type { snakeToCamel } from './utils.js';
 
 export type EnvSource = Record<string, string | undefined>;
 
@@ -42,35 +43,39 @@ export interface EnvVar<TValue, TName extends string> {
 type ZodTypeAny = z.ZodType<any, any, any>;
 type ZodRecordSchema = z.ZodType<Record<string, unknown>, any, any>;
 
-type ParsedRecord<S extends ZodRawShape> = {
-  [K in keyof S & string]: unknown;
-};
+type ParsedValue<
+  Parsed extends Record<string, unknown>,
+  Key extends string,
+> = Key extends keyof Parsed ? Parsed[Key] : undefined;
 
-type ParserOutputForSchema<S extends ZodRawShape, TSchema extends ZodRecordSchema> = {
-  [K in keyof S & string]: (z.output<TSchema> & Record<string, unknown>)[K];
-};
+type ParserOutputForSchema<S extends ZodRawShape, TSchema extends ZodRecordSchema> =
+  z.output<TSchema> extends Record<string, unknown> ? z.output<TSchema> : never;
 
-type DefaultParsed<S extends ZodRawShape> = {
-  [K in keyof S & string]: z.infer<S[K]>;
-};
+type DefaultParsed<S extends ZodRawShape> = { [K in keyof S & string]: z.infer<S[K]> };
 
-type MetaByKey<S extends ZodRawShape, Parsed extends ParsedRecord<S>> = Readonly<{
-  [K in keyof S & string]: EnvVar<Parsed[K], K>;
+type MetaByKey<S extends ZodRawShape, Parsed extends Record<string, unknown>> = Readonly<{
+  [K in keyof S & string]: EnvVar<ParsedValue<Parsed, K>, K>;
 }>;
 
-/** Readonly view into parsed env variable values. */
-type DataAccessor<S extends ZodRawShape, Parsed extends ParsedRecord<S>> = Readonly<Parsed>;
+/** Readonly view into parsed env variable values keyed by original env-var names. */
+type RetainedKey<
+  S extends ZodRawShape,
+  Parsed extends Record<string, unknown>,
+  Key extends keyof S & string,
+> = Key extends keyof Parsed ? Key : never;
 
-type NormalizePlain<S extends string> = S extends Uppercase<S> ? Lowercase<S> : S;
+type RetainedKeys<S extends ZodRawShape, Parsed extends Record<string, unknown>> = {
+  [K in keyof S & string]: RetainedKey<S, Parsed, K>;
+}[keyof S & string];
 
-type SnakeToCamelCase<S extends string> = S extends `${infer Head}_${infer Tail}`
-  ? `${Lowercase<Head>}${Capitalize<SnakeToCamelCase<Tail>>}`
-  : NormalizePlain<S>;
+type DataAccessor<S extends ZodRawShape, Parsed extends Record<string, unknown>> = Readonly<
+  Parsed & {
+    [K in RetainedKeys<S, Parsed>]: Parsed[K];
+  }
+>;
 
 /** Readonly camelCase view into parsed env variable values. */
-type CamelDataAccessor<S extends ZodRawShape, Parsed extends ParsedRecord<S>> = Readonly<{
-  [K in keyof S & string as SnakeToCamelCase<K>]: Parsed[K];
-}>;
+type CamelDataAccessor<Parsed extends Record<string, unknown>> = snakeToCamel<Parsed>;
 
 type EnvVarNames<S extends ZodRawShape> = Readonly<{
   [K in keyof S & string]: K;
@@ -80,8 +85,8 @@ type PickShape<S extends ZodRawShape, Keys extends keyof S & string> = {
   [K in Keys]: S[K];
 };
 
-type PickParsed<Parsed extends Record<string, unknown>, Keys extends keyof Parsed & string> = {
-  [K in Keys]: Parsed[K];
+type PickParsed<Parsed extends Record<string, unknown>, Keys extends string> = {
+  [K in Keys]: ParsedValue<Parsed, K>;
 };
 
 export type EnvShapeOf<TEnv extends EnvImpl<any, any>> =
@@ -108,7 +113,7 @@ const getDefaultEnvSource = (): EnvSource => {
  * - Validation happens on construction; throws ZodError on failure.
  * - Ergonomics: `env.data` exposes parsed values directly, `env.meta.MY_VAR.val` for individual access.
  */
-class EnvImpl<S extends ZodRawShape, Parsed extends ParsedRecord<S> = DefaultParsed<S>> {
+class EnvImpl<S extends ZodRawShape, Parsed extends Record<string, unknown> = DefaultParsed<S>> {
   /** Whole-object schema used for validation. */
   public readonly schema: ZodObject<S>;
   /** Parser that may wrap the base schema (e.g. via transform). */
@@ -120,7 +125,7 @@ class EnvImpl<S extends ZodRawShape, Parsed extends ParsedRecord<S> = DefaultPar
   /** Direct value access keyed by env var name. */
   public readonly data: DataAccessor<S, Parsed>;
   /** Direct value access keyed by camelCase env var name (best-effort; collisions prefer first key). */
-  public readonly camel: CamelDataAccessor<S, Parsed>;
+  public readonly camel: CamelDataAccessor<Parsed>;
   /** Declared environment variable names preserved as a literal map. */
   public readonly keys: EnvVarNames<S>;
 
@@ -133,13 +138,15 @@ class EnvImpl<S extends ZodRawShape, Parsed extends ParsedRecord<S> = DefaultPar
     this.parser = parser;
     this.source = source ?? getDefaultEnvSource();
     const declaredKeys = Object.keys(this.schema.shape) as Array<keyof S & string>;
+    const declaredSet = new Set(declaredKeys as readonly (keyof S & string)[]);
     this.keys = createEnvVarNames(declaredKeys as readonly (keyof S & string)[]);
     // Build candidates from raw strings with minimal coercion.
     const { parsed, rawByKey } = buildValues<S, Parsed>(this.schema, this.parser, this.source);
     const parsedValues = parsed;
+    const parsedRecord = parsedValues as unknown as Record<string, unknown>;
     // Capture parsed values while building frozen metadata containers.
     const metaByKey = {} as {
-      [K in keyof S & string]: EnvVar<Parsed[K], K>;
+      [K in keyof S & string]: EnvVar<ParsedValue<Parsed, K>, K>;
     };
     const dataAccessor = {} as DataAccessor<S, Parsed>;
     // `camel` mirrors the parsed values but exposes camelCase property names for convenience.
@@ -149,28 +156,59 @@ class EnvImpl<S extends ZodRawShape, Parsed extends ParsedRecord<S> = DefaultPar
     for (const key of declaredKeys) {
       metaByKey[key] = Object.freeze({
         name: key,
-        val: parsedValues[key],
+        val: parsedRecord[key as string] as ParsedValue<Parsed, typeof key>,
         raw: rawByKey[key],
       });
       Object.defineProperty(dataAccessor, key, {
         enumerable: true,
-        get: () => parsedValues[key],
+        get: () => parsedRecord[key as string] as ParsedValue<Parsed, typeof key>,
       });
       const camelKey = snakeToCamelKey(key);
-      // If two schema keys normalize to the same camelCase form, prefer the first declaration.
-      // This avoids throwing on duplicate `defineProperty` calls and leaves the camel view best-effort.
+      if (Object.prototype.hasOwnProperty.call(parsedRecord, key as string)) {
+        // If two schema keys normalize to the same camelCase form, prefer the first declaration.
+        // This avoids throwing on duplicate `defineProperty` calls and leaves the camel view best-effort.
+        if (Object.prototype.hasOwnProperty.call(camelAccessor, camelKey)) {
+          continue;
+        }
+        Object.defineProperty(camelAccessor, camelKey, {
+          enumerable: true,
+          get: () => parsedRecord[key as string],
+        });
+      }
+    }
+
+    // Surface additional transform outputs on the data accessor.
+    for (const key of Object.keys(parsedRecord)) {
+      if (declaredSet.has(key as keyof S & string)) {
+        continue;
+      }
+      if (Object.prototype.hasOwnProperty.call(dataAccessor, key)) {
+        continue;
+      }
+      Object.defineProperty(dataAccessor, key, {
+        enumerable: true,
+        get: () => parsedRecord[key],
+      });
+    }
+
+    // Surface any additional fields produced by transforms on the camel accessor.
+    for (const key of Object.keys(parsedRecord)) {
+      if (declaredSet.has(key as keyof S & string)) {
+        continue;
+      }
+      const camelKey = snakeToCamelKey(key);
       if (Object.prototype.hasOwnProperty.call(camelAccessor, camelKey)) {
         continue;
       }
       Object.defineProperty(camelAccessor, camelKey, {
         enumerable: true,
-        get: () => parsedValues[key],
+        get: () => parsedRecord[key],
       });
     }
 
     this.meta = Object.freeze(metaByKey) as MetaByKey<S, Parsed>;
     this.data = Object.freeze(dataAccessor);
-    this.camel = Object.freeze(camelAccessor) as CamelDataAccessor<S, Parsed>;
+    this.camel = Object.freeze(camelAccessor) as CamelDataAccessor<Parsed>;
   }
 
   /**
@@ -356,14 +394,14 @@ class EnvImpl<S extends ZodRawShape, Parsed extends ParsedRecord<S> = DefaultPar
 }
 
 export const Env = EnvImpl;
-export type Env<S extends ZodRawShape, Parsed extends ParsedRecord<S> = DefaultParsed<S>> = EnvImpl<
-  S,
-  Parsed
->;
+export type Env<
+  S extends ZodRawShape,
+  Parsed extends Record<string, unknown> = DefaultParsed<S>,
+> = EnvImpl<S, Parsed>;
 
 /* ---------------- Internal, opinionated parsing ---------------- */
 
-function buildValues<S extends ZodRawShape, Parsed extends ParsedRecord<S>>(
+function buildValues<S extends ZodRawShape, Parsed extends Record<string, unknown>>(
   schema: ZodObject<S>,
   parser: ZodRecordSchema,
   source: EnvSource,
