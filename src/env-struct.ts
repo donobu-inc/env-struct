@@ -85,9 +85,10 @@ type PickShape<S extends ZodRawShape, Keys extends keyof S & string> = {
   [K in Keys]: S[K];
 };
 
-type PickParsed<Parsed extends Record<string, unknown>, Keys extends string> = {
-  [K in Keys]: ParsedValue<Parsed, K>;
-};
+type PickParsed<Parsed extends Record<string, unknown>, Keys extends string> = Pick<
+  Parsed,
+  Extract<Keys, keyof Parsed>
+>;
 
 export type EnvShapeOf<TEnv extends EnvImpl<any, any>> =
   TEnv extends EnvImpl<infer S, any> ? S : never;
@@ -216,7 +217,7 @@ class EnvImpl<S extends ZodRawShape, Parsed extends Record<string, unknown> = De
    */
   public pick<const Keys extends readonly (keyof S & string)[]>(
     ...keys: Keys
-  ): EnvImpl<PickShape<S, Keys[number]>, PickParsed<Parsed, Keys[number]>> {
+  ): Env<PickShape<S, Keys[number]>, PickParsed<Parsed, Keys[number]>> {
     // Build a Zod pick mask keyed by the original schema names. We use a partial
     // record so the compiler accepts extra keys beyond the exact subset literal.
     const mask: Partial<Record<keyof S & string, true>> = {};
@@ -289,7 +290,7 @@ class EnvImpl<S extends ZodRawShape, Parsed extends Record<string, unknown> = De
       );
     }
 
-    return EnvImpl.fromZodObject(subsetSchema, this.source) as EnvImpl<
+    return EnvImpl.fromZodObject(subsetSchema, this.source) as Env<
       PickShape<S, Keys[number]>,
       PickParsed<Parsed, Keys[number]>
     >;
@@ -301,7 +302,7 @@ class EnvImpl<S extends ZodRawShape, Parsed extends Record<string, unknown> = De
    */
   public omit<const Keys extends readonly (keyof S & string)[]>(
     ...keys: Keys
-  ): EnvImpl<
+  ): Env<
     PickShape<S, Exclude<keyof S & string, Keys[number]>>,
     PickParsed<Parsed, Exclude<keyof S & string, Keys[number]>>
   > {
@@ -318,7 +319,7 @@ class EnvImpl<S extends ZodRawShape, Parsed extends Record<string, unknown> = De
     const kept = declaredKeys.filter((key) => !omitSet.has(key));
 
     const picked = this.pick(...(kept as readonly (keyof S & string)[]));
-    return picked as unknown as EnvImpl<
+    return picked as unknown as Env<
       PickShape<S, Exclude<keyof S & string, Keys[number]>>,
       PickParsed<Parsed, Exclude<keyof S & string, Keys[number]>>
     >;
@@ -327,15 +328,12 @@ class EnvImpl<S extends ZodRawShape, Parsed extends Record<string, unknown> = De
   public static fromZod<const Shape extends ZodRawShape>(
     schema: Shape,
     source?: EnvSource,
-  ): EnvImpl<Shape, DefaultParsed<Shape>>;
+  ): Env<Shape>;
   public static fromZod<TSchema extends ZodRecordSchema>(
     schema: TSchema,
     source?: EnvSource,
-  ): EnvImpl<InferSchemaShape<TSchema>, ParserOutputForSchema<InferSchemaShape<TSchema>, TSchema>>;
-  public static fromZod(
-    schema: ZodRecordSchema | ZodRawShape,
-    source?: EnvSource,
-  ): EnvImpl<any, any> {
+  ): Env<InferSchemaShape<TSchema>, ParserOutputForSchema<InferSchemaShape<TSchema>, TSchema>>;
+  public static fromZod(schema: ZodRecordSchema | ZodRawShape, source?: EnvSource): Env<any, any> {
     if (isZodType(schema)) {
       return EnvImpl.fromZodSchema(schema as ZodRecordSchema, source);
     }
@@ -352,7 +350,7 @@ class EnvImpl<S extends ZodRawShape, Parsed extends Record<string, unknown> = De
   public static fromZodObject<S extends ZodRawShape>(
     schema: ZodObject<S>,
     source?: EnvSource,
-  ): EnvImpl<S, ParserOutputForSchema<S, typeof schema>> {
+  ): Env<S, ParserOutputForSchema<S, typeof schema>> {
     return EnvImpl.fromZod(schema, source);
   }
 
