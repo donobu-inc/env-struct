@@ -1,3 +1,32 @@
+/**
+ * @packageDocumentation
+ * Typed, opinionated helpers for reading environment variables with Zod.
+ * The primary surface is the `Env` factory, which parses on construction, throws on validation failures, and returns ergonomic accessors:
+ * - `env.data`: parsed values keyed by the original env-var names.
+ * - `env.camel`: best-effort camelCase view over the same parsed values.
+ * - `env.meta`: per-key metadata including raw and parsed values.
+ * - `env.keys`: literal mapping of declared names for IntelliSense and ref safety.
+ *
+ * Use whichever factory fits your workflow:
+ * - `Env.fromZod()` for full validation via a Zod shape or effects pipeline (recommended).
+ * - `Env.fromNames()` when you just need presence/absence with optional strings.
+ * - `Env.fromValues()` to build an env from an object literal (handy in tests).
+ *
+ * Quick start:
+ * ```ts
+ * import { Env } from 'env-struct';
+ * import { z } from 'zod/v4';
+ *
+ * const env = Env.fromZod({
+ *   DATABASE_URL: z.string().url(),
+ *   PORT: z.coerce.number().default(3000),
+ * });
+ *
+ * env.data.DATABASE_URL; // typed string
+ * env.camel.port;        // 3000 (camelCase accessor)
+ * env.meta.PORT.raw;     // original string from process.env
+ * ```
+ */
 import { z } from 'zod/v4';
 import type { ZodObject, ZodRawShape, ZodType } from 'zod/v4';
 import type { snakeToCamel } from './utils.js';
@@ -325,6 +354,43 @@ class EnvImpl<S extends ZodRawShape, Parsed extends Record<string, unknown> = De
     >;
   }
 
+  /**
+   * Parse environment variables with a Zod schema and get a typed accessor immediately.
+   * Accepts either a raw Zod object shape or any Zod record-compatible schema (effects, pipelines, transforms).
+   * Values are pulled from `source` (defaults to `process.env`), parsed at construction time, and will throw a `ZodError` if invalid.
+   * The returned `Env` exposes `data` for parsed values, `meta` for raw/parsed per-key info, and `camel` for camelCase accessors.
+   *
+   * @param schema Zod object shape or any schema that ultimately resolves to a ZodObject.
+   * @param source Optional env source; pass a plain object to avoid relying on `process.env` (useful for tests, workers, and bundlers).
+   *
+   * @example Basic validation with a raw shape
+   * ```ts
+   * import { Env, z } from 'env-struct';
+   *
+   * const env = Env.fromZod({
+   *   DATABASE_URL: z.string().url(),
+   *   ENABLE_CACHE: z.boolean().default(false),
+   * });
+   *
+   * env.data.DATABASE_URL; // string
+   * env.data.ENABLE_CACHE; // boolean
+   * env.camel.enableCache; // camelCase view mirrors parsed values
+   * console.log(env.meta.DATABASE_URL.raw); // raw string pulled from process.env
+   * ```
+   *
+   * @example Using a Zod pipeline and custom source
+   * ```ts
+   * import { Env, z } from 'env-struct';
+   *
+   * const schema = z
+   *   .object({ PORT: z.coerce.number().min(1024) })
+   *   .transform((value) => ({ ...value, url: `http://localhost:${value.PORT}` }));
+   *
+   * const env = Env.fromZod(schema, { PORT: '3000' });
+   * env.data.PORT; // 3000 (number)
+   * env.data.url; // "http://localhost:3000" (derived in transform)
+   * ```
+   */
   public static fromZod<const Shape extends ZodRawShape>(
     schema: Shape,
     source?: EnvSource,
@@ -341,12 +407,48 @@ class EnvImpl<S extends ZodRawShape, Parsed extends Record<string, unknown> = De
     return EnvImpl.fromRawShape(schema as ZodRawShape, source);
   }
 
-  /** @deprecated Use `Env.fromZod()` instead. */
+  /**
+   * Legacy alias for `Env.fromZod()` that accepts a raw Zod object shape.
+   * Preserved for compatibility with earlier versions while you migrate to `Env.fromZod()`.
+   *
+   * @deprecated Use `Env.fromZod()` instead.
+   *
+   * @example
+   * ```ts
+   * import { Env, z } from 'env-struct';
+   *
+   * const env = Env.fromSchema(
+   *   { API_KEY: z.string().min(1) },
+   *   { API_KEY: 'sk-test-123' },
+   * );
+   *
+   * env.data.API_KEY; // "sk-test-123"
+   * ```
+   */
   public static fromSchema<S extends ZodRawShape>(schema: S, source?: EnvSource): Env<S> {
     return EnvImpl.fromZod(schema, source) as Env<S>;
   }
 
-  /** @deprecated Use `Env.fromZod()` instead. */
+  /**
+   * Legacy alias for `Env.fromZod()` when you already hold a `z.object(...)` instance.
+   * Behaves identically to `Env.fromZod()` but kept to avoid breaking existing imports.
+   *
+   * @deprecated Use `Env.fromZod()` instead.
+   *
+   * @example
+   * ```ts
+   * import { Env, z } from 'env-struct';
+   *
+   * const schema = z.object({
+   *   HOST: z.string().default('localhost'),
+   *   PORT: z.coerce.number().int(),
+   * });
+   *
+   * const env = Env.fromZodObject(schema, { PORT: '8080' });
+   * env.data.HOST; // "localhost"
+   * env.data.PORT; // 8080
+   * ```
+   */
   public static fromZodObject<S extends ZodRawShape>(
     schema: ZodObject<S>,
     source?: EnvSource,
@@ -354,6 +456,27 @@ class EnvImpl<S extends ZodRawShape, Parsed extends Record<string, unknown> = De
     return EnvImpl.fromZod(schema, source);
   }
 
+  /**
+   * Create an `Env` by declaring only the variable names you care about.
+   * Each name becomes an optional string field; parsing is limited to the coercion performed by Zod and this library.
+   * Ideal for quick scaffolding when you want a typed map of env vars without committing to detailed validation yet.
+   *
+   * @param names Ordered list of environment variable names to expose.
+   * @param source Optional env source; defaults to `process.env`.
+   *
+   * @example
+   * ```ts
+   * import { Env } from 'env-struct';
+   *
+   * const env = Env.fromNames(['NODE_ENV', 'LOG_LEVEL'], {
+   *   NODE_ENV: 'production',
+   * });
+   *
+   * env.data.NODE_ENV; // "production"
+   * env.data.LOG_LEVEL; // undefined when not provided
+   * env.keys.LOG_LEVEL; // "LOG_LEVEL" (literal mapping for intellisense)
+   * ```
+   */
   public static fromNames<const Names extends readonly string[]>(
     names: Names,
     source?: EnvSource,
@@ -362,6 +485,26 @@ class EnvImpl<S extends ZodRawShape, Parsed extends Record<string, unknown> = De
     return new EnvImpl<EnvShapeFromNames<Names>>(schema, source, schema);
   }
 
+  /**
+   * Create an `Env` directly from a record of values, using the record's keys to define the schema.
+   * Each entry is treated as an optional string; values are parsed immediately so you can inject fixtures without touching `process.env`.
+   *
+   * @param values Plain object of env-var names to raw string values.
+   *
+   * @example
+   * ```ts
+   * import { Env } from 'env-struct';
+   *
+   * const env = Env.fromValues({
+   *   API_URL: 'https://example.test',
+   *   FEATURE_FLAG: 'true',
+   * });
+   *
+   * env.data.API_URL; // "https://example.test"
+   * env.data.FEATURE_FLAG; // "true" (string; use `fromZod` for typed coercion)
+   * Object.keys(env.meta); // ["API_URL", "FEATURE_FLAG"]
+   * ```
+   */
   public static fromValues<const Source extends EnvSource>(
     values: Source,
   ): Env<EnvShapeFromRecord<Source>> {
