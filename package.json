@@ -30,7 +30,8 @@
     "environment",
     "zod",
     "schema",
-    "validation"
+    "validation",
+    "env-struct"
   ],
   "author": "Donobu",
   "repository": {

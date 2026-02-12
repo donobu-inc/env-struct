@@ -313,6 +313,78 @@ describe('Env', () => {
     expect(env.meta.FLAG.raw).toBe('true');
   });
 
+  it('parses array fields from JSON strings', () => {
+    const schema = z.object({
+      TAGS: z.array(z.string()),
+      PORTS: z.array(z.number()),
+      SERVERS: z.array(z.object({ host: z.string(), port: z.number() })),
+    });
+
+    const env = Env.fromZod(schema, {
+      TAGS: '["dev", "staging", "production"]',
+      PORTS: '[3000, 8080, 9090]',
+      SERVERS: '[{"host":"localhost","port":3000},{"host":"example.com","port":8080}]',
+    });
+
+    expect(env.data.TAGS).toEqual(['dev', 'staging', 'production']);
+    expect(env.data.PORTS).toEqual([3000, 8080, 9090]);
+    expect(env.data.SERVERS).toEqual([
+      { host: 'localhost', port: 3000 },
+      { host: 'example.com', port: 8080 },
+    ]);
+
+    expect(env.meta.TAGS).toEqual({
+      name: 'TAGS',
+      val: ['dev', 'staging', 'production'],
+      raw: '["dev", "staging", "production"]',
+    });
+  });
+
+  it('handles empty arrays', () => {
+    const schema = z.object({
+      ITEMS: z.array(z.string()),
+      OPTIONAL_ITEMS: z.array(z.number()).optional(),
+    });
+
+    const env = Env.fromZod(schema, {
+      ITEMS: '[]',
+    });
+
+    expect(env.data.ITEMS).toEqual([]);
+    expect(env.data.OPTIONAL_ITEMS).toBeUndefined();
+    expect(env.meta.ITEMS.val).toEqual([]);
+  });
+
+  it('throws ZodError when array fields contain invalid JSON', () => {
+    const schema = z.object({
+      TAGS: z.array(z.string()),
+    });
+
+    expect(() => Env.fromZod(schema, { TAGS: '[invalid json' })).toThrow(ZodError);
+    expect(() => Env.fromZod(schema, { TAGS: 'not-an-array' })).toThrow(ZodError);
+  });
+
+  it('throws ZodError when array elements do not match schema', () => {
+    const schema = z.object({
+      PORTS: z.array(z.number()),
+    });
+
+    expect(() => Env.fromZod(schema, { PORTS: '["not", "numbers"]' })).toThrow(ZodError);
+  });
+
+  it('preserves whitespace in array JSON strings and trims values after parsing', () => {
+    const schema = z.object({
+      TAGS: z.array(z.string()),
+    });
+
+    const env = Env.fromZod(schema, {
+      TAGS: ' ["foo", "bar"] ',
+    });
+
+    expect(env.data.TAGS).toEqual(['foo', 'bar']);
+    expect(env.meta.TAGS.raw).toBe(' ["foo", "bar"] ');
+  });
+
   it('creates a scoped Env via pick while sharing the same source', () => {
     const baseEnv = Env.fromNames(['FOO', 'BAR', 'BAZ'] as const, {
       FOO: ' foo ',
