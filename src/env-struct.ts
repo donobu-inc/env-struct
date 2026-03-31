@@ -247,16 +247,16 @@ class EnvImpl<S extends ZodRawShape, Parsed extends Record<string, unknown> = De
   public pick<const Keys extends readonly (keyof S & string)[]>(
     ...keys: Keys
   ): Env<PickShape<S, Keys[number]>, PickParsed<Parsed, Keys[number]>> {
-    // Build a Zod pick mask keyed by the original schema names. We use a partial
-    // record so the compiler accepts extra keys beyond the exact subset literal.
-    const mask: Partial<Record<keyof S & string, true>> = {};
-
+    // Build the subset schema by extracting individual field schemas from the
+    // shape rather than calling `this.schema.pick()`. Zod 4 forbids `.pick()`
+    // on schemas that carry refinements, so we sidestep that restriction by
+    // constructing a fresh z.object from the selected fields.
+    const pickedShape = {} as { [K in Keys[number]]: S[K] };
     for (const key of keys) {
-      mask[key] = true;
+      pickedShape[key] = this.schema.shape[key];
     }
 
-    // Start with a plain Zod-level pick so field-level constraints stay intact.
-    let subsetSchema = this.schema.pick(mask as any) as unknown as ZodObject<{
+    let subsetSchema = z.object(pickedShape) as unknown as ZodObject<{
       [K in Keys[number]]: S[K];
     }>;
     // Cross-field validations live inside the internal `_def.checks` array. If no

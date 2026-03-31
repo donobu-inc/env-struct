@@ -1,15 +1,14 @@
-name: Continuous Integration
+name: Publish to NPM
 
 on:
-  push:
-    branches:
-      - main
-  pull_request:
-    branches:
-      - main
+  workflow_dispatch:
+
+permissions:
+  id-token: write # Required for https://docs.npmjs.com/trusted-publishers
+  contents: read
 
 jobs:
-  build-and-test:
+  publish:
     runs-on: ubuntu-latest
 
     steps:
@@ -33,3 +32,6 @@ jobs:
 
       - name: Test
         run: pnpm test
+
+      - name: Publish to NPM
+        run: pnpm publish --no-git-checks
