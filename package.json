@@ -1,22 +1,14 @@
 {
   "name": "env-struct",
-  "version": "1.4.0",
+  "version": "1.5.0",
   "description": "Schema-first environment variable loader with typed accessors and metadata.",
   "license": "Apache-2.0",
-  "type": "module",
-  "main": "./dist/index.cjs",
-  "module": "./dist/index.js",
+  "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
   "exports": {
     ".": {
-      "import": {
-        "types": "./dist/index.d.ts",
-        "default": "./dist/index.js"
-      },
-      "require": {
-        "types": "./dist/index.d.cts",
-        "default": "./dist/index.cjs"
-      }
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
     }
   },
   "files": [
@@ -24,10 +16,11 @@
   ],
   "sideEffects": false,
   "scripts": {
-    "build": "pnpm run format && tsup src/index.ts --dts --format esm,cjs --sourcemap --clean",
+    "build": "pnpm run format && tsup src/index.ts --dts --format cjs --sourcemap --clean",
     "format": "prettier --write .",
     "lint": "tsc --project tsconfig.test.json",
-    "test": "vitest run"
+    "test": "vitest run",
+    "attw": "attw --pack ."
   },
   "keywords": [
     "env",
@@ -50,6 +43,7 @@
     "zod": "^4.0.0"
   },
   "devDependencies": {
+    "@arethetypeswrong/cli": "^0.18.0",
     "prettier": "^3.3.3",
     "tsup": "^8.5.0",
     "typescript": "^5.4.0",

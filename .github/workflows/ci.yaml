@@ -33,3 +33,6 @@ jobs:
 
       - name: Test
         run: pnpm test
+
+      - name: Verify type-resolution shape (arethetypeswrong)
+        run: pnpm run attw
