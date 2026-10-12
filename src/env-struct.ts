@@ -3,7 +3,7 @@
  * Typed, opinionated helpers for reading environment variables with Zod.
  * The primary surface is the `Env` factory, which parses on construction, throws on validation failures, and returns ergonomic accessors:
  * - `env.data`: parsed values keyed by the original env-var names.
- * - `env.camel`: best-effort camelCase view over the same parsed values.
+ * - `env.toCamelCase()`: an independent, deeply camelized copy of parsed JSON-shaped values.
  * - `env.meta`: per-key metadata including raw and parsed values.
  * - `env.keys`: literal mapping of declared names for IntelliSense and ref safety.
  *
@@ -22,14 +22,16 @@
  *   PORT: z.coerce.number().default(3000),
  * });
  *
+ * const config = env.toCamelCase();
  * env.data.DATABASE_URL; // typed string
- * env.camel.port;        // 3000 (camelCase accessor)
+ * config.port;          // 3000 (copied camelCase value)
  * env.meta.PORT.raw;     // original string from process.env
  * ```
  */
 import { z } from 'zod/v4';
 import type { ZodObject, ZodRawShape, ZodType } from 'zod/v4';
 import type { snakeToCamel } from './utils.js';
+import { camelize } from './camelize.js';
 
 export type EnvSource = Record<string, string | undefined>;
 
@@ -103,9 +105,6 @@ type DataAccessor<S extends ZodRawShape, Parsed extends Record<string, unknown>>
   }
 >;
 
-/** Readonly camelCase view into parsed env variable values. */
-type CamelDataAccessor<Parsed extends Record<string, unknown>> = snakeToCamel<Parsed>;
-
 type EnvVarNames<S extends ZodRawShape> = Readonly<{
   [K in keyof S & string]: K;
 }>;
@@ -113,11 +112,6 @@ type EnvVarNames<S extends ZodRawShape> = Readonly<{
 type PickShape<S extends ZodRawShape, Keys extends keyof S & string> = {
   [K in Keys]: S[K];
 };
-
-type PickParsed<Parsed extends Record<string, unknown>, Keys extends string> = Pick<
-  Parsed,
-  Extract<Keys, keyof Parsed>
->;
 
 export type EnvShapeOf<TEnv extends EnvImpl<any, any>> =
   TEnv extends EnvImpl<infer S, any> ? S : never;
@@ -128,7 +122,7 @@ export type EnvParsedOf<TEnv extends EnvImpl<any, any>> =
 export type EnvPick<
   TEnv extends EnvImpl<any, any>,
   Keys extends keyof EnvShapeOf<TEnv> & string,
-> = EnvImpl<PickShape<EnvShapeOf<TEnv>, Keys>, PickParsed<EnvParsedOf<TEnv>, Keys>>;
+> = EnvImpl<PickShape<EnvShapeOf<TEnv>, Keys>>;
 
 /** Resolve a default env source that works in Node and non-Node runtimes. */
 const getDefaultEnvSource = (): EnvSource => {
@@ -148,14 +142,14 @@ class EnvImpl<S extends ZodRawShape, Parsed extends Record<string, unknown> = De
   public readonly schema: ZodObject<S>;
   /** Parser that may wrap the base schema (e.g. via transform). */
   private readonly parser: ZodRecordSchema;
+  /** Parsed output retained for independent camelCase conversions. */
+  private readonly parsedValues: Parsed;
   /** Raw env-var source. */
   public readonly source: EnvSource;
   /** Per-key metadata including parsed and raw values. */
   public readonly meta: MetaByKey<S, Parsed>;
   /** Direct value access keyed by env var name. */
   public readonly data: DataAccessor<S, Parsed>;
-  /** Direct value access keyed by camelCase env var name (best-effort; collisions prefer first key). */
-  public readonly camel: CamelDataAccessor<Parsed>;
   /** Declared environment variable names preserved as a literal map. */
   public readonly keys: EnvVarNames<S>;
 
@@ -168,20 +162,23 @@ class EnvImpl<S extends ZodRawShape, Parsed extends Record<string, unknown> = De
     this.parser = parser;
     this.source = source ?? getDefaultEnvSource();
     const declaredKeys = Object.keys(this.schema.shape) as Array<keyof S & string>;
+    // This name conflicts with object prototypes and is not retained by Zod object parsing.
+    if (declaredKeys.includes('__proto__')) {
+      throw new TypeError(
+        'Env: "__proto__" is not supported as a declared environment variable name',
+      );
+    }
     const declaredSet = new Set(declaredKeys as readonly (keyof S & string)[]);
     this.keys = createEnvVarNames(declaredKeys as readonly (keyof S & string)[]);
     // Build candidates from raw strings with minimal coercion.
     const { parsed, rawByKey } = buildValues<S, Parsed>(this.schema, this.parser, this.source);
-    const parsedValues = parsed;
-    const parsedRecord = parsedValues as unknown as Record<string, unknown>;
+    this.parsedValues = parsed;
+    const parsedRecord = parsed as Record<string, unknown>;
     // Capture parsed values while building frozen metadata containers.
     const metaByKey = {} as {
       [K in keyof S & string]: EnvVar<ParsedValue<Parsed, K>, K>;
     };
     const dataAccessor = {} as DataAccessor<S, Parsed>;
-    // `camel` mirrors the parsed values but exposes camelCase property names for convenience.
-    // We keep this as a plain object so we can wire lazy getters that share the same parsed cache.
-    const camelAccessor: Record<string, unknown> = {};
     // Populate metadata and value accessors for each declared key.
     for (const key of declaredKeys) {
       metaByKey[key] = Object.freeze({
@@ -193,18 +190,6 @@ class EnvImpl<S extends ZodRawShape, Parsed extends Record<string, unknown> = De
         enumerable: true,
         get: () => parsedRecord[key as string] as ParsedValue<Parsed, typeof key>,
       });
-      const camelKey = snakeToCamelKey(key);
-      if (Object.prototype.hasOwnProperty.call(parsedRecord, key as string)) {
-        // If two schema keys normalize to the same camelCase form, prefer the first declaration.
-        // This avoids throwing on duplicate `defineProperty` calls and leaves the camel view best-effort.
-        if (Object.prototype.hasOwnProperty.call(camelAccessor, camelKey)) {
-          continue;
-        }
-        Object.defineProperty(camelAccessor, camelKey, {
-          enumerable: true,
-          get: () => parsedRecord[key as string],
-        });
-      }
     }
 
     // Surface additional transform outputs on the data accessor.
@@ -221,120 +206,51 @@ class EnvImpl<S extends ZodRawShape, Parsed extends Record<string, unknown> = De
       });
     }
 
-    // Surface any additional fields produced by transforms on the camel accessor.
-    for (const key of Object.keys(parsedRecord)) {
-      if (declaredSet.has(key as keyof S & string)) {
-        continue;
-      }
-      const camelKey = snakeToCamelKey(key);
-      if (Object.prototype.hasOwnProperty.call(camelAccessor, camelKey)) {
-        continue;
-      }
-      Object.defineProperty(camelAccessor, camelKey, {
-        enumerable: true,
-        get: () => parsedRecord[key],
-      });
-    }
-
     this.meta = Object.freeze(metaByKey) as MetaByKey<S, Parsed>;
     this.data = Object.freeze(dataAccessor);
-    this.camel = Object.freeze(camelAccessor) as CamelDataAccessor<Parsed>;
   }
 
   /**
-   * Create a new Env scoped to a subset of keys while reusing the same source.
+   * Return a fresh, deeply camelized copy of the current parsed JSON-shaped values.
+   * Preserves undefined and schema-defined readonly protections without sharing objects or arrays.
+   * Throws TypeError with a path for key collisions, cycles, or unsupported values.
+   * Does not reread the source or revalidate values.
+   */
+  public toCamelCase(): snakeToCamel<Parsed> {
+    return camelize(this.parsedValues);
+  }
+
+  /**
+   * Create a new Env by parsing only the selected fields from a copy of their current source values.
+   * Retains field-level validation, but drops whole-object refinements and transforms.
+   * Throws if any selected key was not declared on the original schema.
    */
   public pick<const Keys extends readonly (keyof S & string)[]>(
     ...keys: Keys
-  ): Env<PickShape<S, Keys[number]>, PickParsed<Parsed, Keys[number]>> {
-    // Build the subset schema by extracting individual field schemas from the
-    // shape rather than calling `this.schema.pick()`. Zod 4 forbids `.pick()`
-    // on schemas that carry refinements, so we sidestep that restriction by
-    // constructing a fresh z.object from the selected fields.
+  ): Env<PickShape<S, Keys[number]>> {
+    // A fresh object preserves field schemas without retaining whole-object
+    // rules that may depend on excluded fields.
     const pickedShape = {} as { [K in Keys[number]]: S[K] };
+    const pickedSource: EnvSource = {};
     for (const key of keys) {
-      pickedShape[key] = this.schema.shape[key];
-    }
-
-    let subsetSchema = z.object(pickedShape) as unknown as ZodObject<{
-      [K in Keys[number]]: S[K];
-    }>;
-    // Cross-field validations live inside the internal `_def.checks` array. If no
-    // refinements exist we can return early with the simple pick result.
-    const baseChecks = (
-      this.schema as unknown as {
-        _def?: { checks?: Array<{ _zod?: { check?: (val: unknown, ctx: unknown) => void } }> };
+      if (!Object.prototype.hasOwnProperty.call(this.schema.shape, key)) {
+        throw new Error(`Env.pick(): attempted to pick undeclared key "${key}"`);
       }
-    )._def?.checks;
-
-    if (Array.isArray(baseChecks) && baseChecks.length > 0) {
-      // Knowing which keys were picked lets us skip rehydrating values that callers
-      // may want to intentionally leave blank during validation.
-      const baseKeys = Object.keys(this.schema.shape) as Array<keyof S & string>;
-      const picked = new Set(keys as readonly (keyof S & string)[]);
-      subsetSchema = subsetSchema.check(
-        z.superRefine((data, ctx) => {
-          // Create a shallow copy of the parsed subset so we can layer in any missing
-          // fields required by the original refinement logic.
-          const snapshot = { ...(data as Record<string, unknown>) };
-
-          for (const key of baseKeys) {
-            if (picked.has(key)) {
-              continue;
-            }
-            if (!(key in snapshot)) {
-              // Feed previously parsed values back into the snapshot. This mirrors what
-              // the original refinement saw without forcing new parsing work.
-              snapshot[key] = (this.data as any)[key];
-            }
-          }
-
-          for (const check of baseChecks) {
-            const run = check?._zod?.check as
-              | ((payload: {
-                  value: unknown;
-                  issues: unknown[];
-                  addIssue: (issue: any) => void;
-                }) => void)
-              | undefined;
-            if (typeof run === 'function') {
-              const originalValue = ctx.value;
-              try {
-                // Temporarily mirror the full dataset so cross-field checks see prior values.
-                ctx.value = snapshot as typeof data;
-                run(
-                  ctx as unknown as {
-                    value: unknown;
-                    issues: unknown[];
-                    addIssue: (issue: any) => void;
-                  },
-                );
-              } finally {
-                // Restore the payload so other refinements (if any) receive the expected context.
-                ctx.value = originalValue;
-              }
-            }
-          }
-        }),
-      );
+      pickedShape[key] = this.schema.shape[key];
+      pickedSource[key] = this.source[key];
     }
 
-    return EnvImpl.fromZodObject(subsetSchema, this.source) as Env<
-      PickShape<S, Keys[number]>,
-      PickParsed<Parsed, Keys[number]>
-    >;
+    return EnvImpl.fromRawShape(pickedShape, pickedSource);
   }
 
   /**
-   * Create a new Env without the specified keys while reusing the same source.
+   * Create a new Env without the specified keys, including in its copied source.
+   * Retains field-level validation, but drops whole-object refinements and transforms.
    * Throws if any omitted key was not declared on the original schema.
    */
   public omit<const Keys extends readonly (keyof S & string)[]>(
     ...keys: Keys
-  ): Env<
-    PickShape<S, Exclude<keyof S & string, Keys[number]>>,
-    PickParsed<Parsed, Exclude<keyof S & string, Keys[number]>>
-  > {
+  ): Env<PickShape<S, Exclude<keyof S & string, Keys[number]>>> {
     const declaredKeys = Object.keys(this.schema.shape) as Array<keyof S & string>;
     const declaredSet = new Set(declaredKeys);
 
@@ -348,39 +264,39 @@ class EnvImpl<S extends ZodRawShape, Parsed extends Record<string, unknown> = De
     const kept = declaredKeys.filter((key) => !omitSet.has(key));
 
     const picked = this.pick(...(kept as readonly (keyof S & string)[]));
-    return picked as unknown as Env<
-      PickShape<S, Exclude<keyof S & string, Keys[number]>>,
-      PickParsed<Parsed, Exclude<keyof S & string, Keys[number]>>
-    >;
+    return picked as Env<PickShape<S, Exclude<keyof S & string, Keys[number]>>>;
   }
 
   /**
    * Parse environment variables with a Zod schema and get a typed accessor immediately.
    * Accepts either a raw Zod object shape or any Zod record-compatible schema (effects, pipelines, transforms).
    * Values are pulled from `source` (defaults to `process.env`), parsed at construction time, and will throw a `ZodError` if invalid.
-   * The returned `Env` exposes `data` for parsed values, `meta` for raw/parsed per-key info, and `camel` for camelCase accessors.
+   * The returned `Env` exposes `data` for parsed values, `meta` for raw/parsed per-key info, and `toCamelCase()` for a deep camelCase copy of JSON-shaped values.
    *
    * @param schema Zod object shape or any schema that ultimately resolves to a ZodObject.
    * @param source Optional env source; pass a plain object to avoid relying on `process.env` (useful for tests, workers, and bundlers).
    *
    * @example Basic validation with a raw shape
    * ```ts
-   * import { Env, z } from 'env-struct';
+   * import { Env } from 'env-struct';
+   * import { z } from 'zod/v4';
    *
    * const env = Env.fromZod({
    *   DATABASE_URL: z.string().url(),
    *   ENABLE_CACHE: z.boolean().default(false),
    * });
    *
+   * const config = env.toCamelCase();
    * env.data.DATABASE_URL; // string
    * env.data.ENABLE_CACHE; // boolean
-   * env.camel.enableCache; // camelCase view mirrors parsed values
+   * config.enableCache; // copied camelCase value
    * console.log(env.meta.DATABASE_URL.raw); // raw string pulled from process.env
    * ```
    *
    * @example Using a Zod pipeline and custom source
    * ```ts
-   * import { Env, z } from 'env-struct';
+   * import { Env } from 'env-struct';
+   * import { z } from 'zod/v4';
    *
    * const schema = z
    *   .object({ PORT: z.coerce.number().min(1024) })
@@ -405,55 +321,6 @@ class EnvImpl<S extends ZodRawShape, Parsed extends Record<string, unknown> = De
     }
 
     return EnvImpl.fromRawShape(schema as ZodRawShape, source);
-  }
-
-  /**
-   * Legacy alias for `Env.fromZod()` that accepts a raw Zod object shape.
-   * Preserved for compatibility with earlier versions while you migrate to `Env.fromZod()`.
-   *
-   * @deprecated Use `Env.fromZod()` instead.
-   *
-   * @example
-   * ```ts
-   * import { Env, z } from 'env-struct';
-   *
-   * const env = Env.fromSchema(
-   *   { API_KEY: z.string().min(1) },
-   *   { API_KEY: 'sk-test-123' },
-   * );
-   *
-   * env.data.API_KEY; // "sk-test-123"
-   * ```
-   */
-  public static fromSchema<S extends ZodRawShape>(schema: S, source?: EnvSource): Env<S> {
-    return EnvImpl.fromZod(schema, source) as Env<S>;
-  }
-
-  /**
-   * Legacy alias for `Env.fromZod()` when you already hold a `z.object(...)` instance.
-   * Behaves identically to `Env.fromZod()` but kept to avoid breaking existing imports.
-   *
-   * @deprecated Use `Env.fromZod()` instead.
-   *
-   * @example
-   * ```ts
-   * import { Env, z } from 'env-struct';
-   *
-   * const schema = z.object({
-   *   HOST: z.string().default('localhost'),
-   *   PORT: z.coerce.number().int(),
-   * });
-   *
-   * const env = Env.fromZodObject(schema, { PORT: '8080' });
-   * env.data.HOST; // "localhost"
-   * env.data.PORT; // 8080
-   * ```
-   */
-  public static fromZodObject<S extends ZodRawShape>(
-    schema: ZodObject<S>,
-    source?: EnvSource,
-  ): Env<S, ParserOutputForSchema<S, typeof schema>> {
-    return EnvImpl.fromZod(schema, source);
   }
 
   /**
@@ -725,18 +592,6 @@ function buildSchemaFromNames<const Names extends readonly string[]>(
     names.map((name) => [name, z.string().optional()] as const),
   ) as EnvShapeFromNames<Names>;
   return z.object(shape);
-}
-
-/**
- * Convert a declared schema key into its camelCase accessor form.
- * Keeps pre-camel keys intact while downcasing ALL_CAPS and SNAKE_CASE names.
- */
-function snakeToCamelKey(key: string): string {
-  if (key.includes('_')) {
-    return key.toLowerCase().replace(/_([a-z])/g, (_, letter: string) => letter.toUpperCase());
-  }
-
-  return key === key.toUpperCase() ? key.toLowerCase() : key;
 }
 
 type InferSchemaShape<TSchema extends ZodTypeAny> =

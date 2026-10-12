@@ -1,8 +1,8 @@
-type Primitive = string | number | boolean | bigint | symbol | null | undefined;
+type Primitive = string | number | boolean | null | undefined;
 
 /**
  * Lowercase all-caps strings while leaving mixed-case names intact.
- * This mirrors the runtime casing logic used by `Env.fromZod().camel`.
+ * This mirrors the runtime casing logic used by `Env.toCamelCase()`.
  */
 type NormalizePlain<S extends string> = S extends Uppercase<S> ? Lowercase<S> : S;
 
@@ -14,10 +14,10 @@ export type SnakeToCamelKey<S extends string> = S extends `${infer Head}_${infer
   : NormalizePlain<S>;
 
 /**
- * Recursively camel-case keys and nested values.
+ * Recursively camel-case keys and nested values, preserving property modifiers.
  */
 type SnakeToCamelObject<T> = {
-  readonly [K in keyof T as K extends string ? SnakeToCamelKey<K> : K]: snakeToCamel<T[K]>;
+  [K in keyof T as K extends string ? SnakeToCamelKey<K> : K]: snakeToCamel<T[K]>;
 };
 
 type SnakeToCamelArray<T extends readonly unknown[]> = {
@@ -25,29 +25,33 @@ type SnakeToCamelArray<T extends readonly unknown[]> = {
 };
 
 /**
- * Recursively convert keys on arbitrary structures from `SNAKE_CASE` (or ALL_CAPS) to `camelCase`.
- * Designed for `z.infer` outputs, but works with any nested object, array, map, or promise.
+ * Recursively convert keys on JSON-shaped values from `SNAKE_CASE` (or ALL_CAPS) to `camelCase`.
+ * Preserves existing readonly and optional modifiers without adding new ones.
+ * Known non-JSON values map to never. Plain-object and finite-number restrictions
+ * are checked at runtime by Env.toCamelCase(); TypeScript cannot express them fully.
  */
-export type snakeToCamel<T> = T extends Primitive
+export type snakeToCamel<T> = 0 extends 1 & T
   ? T
-  : T extends (...args: any[]) => unknown
-    ? T
-    : T extends Promise<infer U>
-      ? Promise<snakeToCamel<U>>
-      : T extends Map<infer K, infer V>
-        ? Map<snakeToCamel<K>, snakeToCamel<V>>
-        : T extends ReadonlyMap<infer K, infer V>
-          ? ReadonlyMap<snakeToCamel<K>, snakeToCamel<V>>
-          : T extends Set<infer Item>
-            ? Set<snakeToCamel<Item>>
-            : T extends ReadonlySet<infer Item>
-              ? ReadonlySet<snakeToCamel<Item>>
-              : T extends WeakMap<infer K, infer V>
-                ? WeakMap<K, snakeToCamel<V>>
-                : T extends WeakSet<infer Item>
-                  ? WeakSet<Item>
-                  : T extends readonly unknown[]
-                    ? SnakeToCamelArray<T>
-                    : T extends object
-                      ? SnakeToCamelObject<T>
-                      : T;
+  : unknown extends T
+    ? unknown
+    : T extends Primitive
+      ? T
+      : T extends
+            | bigint
+            | symbol
+            | Function
+            | Date
+            | RegExp
+            | ReadonlyMap<unknown, unknown>
+            | ReadonlySet<unknown>
+            | WeakMap<object, unknown>
+            | WeakSet<object>
+            | PromiseLike<unknown>
+            | ArrayBuffer
+            | ArrayBufferView
+        ? never
+        : T extends readonly unknown[]
+          ? SnakeToCamelArray<T>
+          : T extends object
+            ? SnakeToCamelObject<T>
+            : never;

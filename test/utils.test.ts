@@ -19,43 +19,49 @@ describe('snakeToCamel (type)', () => {
     };
 
     expectTypeOf<snakeToCamel<Input>>().toEqualTypeOf<{
-      readonly fooBar: string;
-      readonly nestedValue: {
-        readonly childKey: number;
-        readonly innerObject: {
-          readonly deepFlag: boolean;
+      fooBar: string;
+      nestedValue: {
+        childKey: number;
+        innerObject: {
+          deepFlag: boolean;
         };
       };
-      readonly mixed: {
-        readonly AlreadyCamel: string;
+      mixed: {
+        AlreadyCamel: string;
       };
     }>();
   });
 
-  it('handles tuples, arrays, maps, sets, and promises', () => {
+  it('handles tuples and arrays', () => {
     type Input = {
       ARRAY_ITEMS: Array<{ CHILD_FLAG: boolean }>;
       TUPLE_PAIR: [{ USER_ID: string }, { SESSION_ID: string }];
       READONLY_TUPLE: readonly [{ FIRST_NAME: string }, { LAST_NAME: string }];
-      VALUE_MAP: Map<string, { INNER_KEY: string }>;
-      VALUE_SET: Set<{ INNER_FLAG: boolean }>;
-      FUTURE_RESULT: Promise<{ WILL_RUN: boolean }>;
     };
 
     expectTypeOf<snakeToCamel<Input>>().toEqualTypeOf<{
-      readonly arrayItems: Array<{ readonly childFlag: boolean }>;
-      readonly tuplePair: [{ readonly userId: string }, { readonly sessionId: string }];
-      readonly readonlyTuple: readonly [
-        { readonly firstName: string },
-        { readonly lastName: string },
-      ];
-      readonly valueMap: Map<string, { readonly innerKey: string }>;
-      readonly valueSet: Set<{ readonly innerFlag: boolean }>;
-      readonly futureResult: Promise<{ readonly willRun: boolean }>;
+      arrayItems: Array<{ childFlag: boolean }>;
+      tuplePair: [{ userId: string }, { sessionId: string }];
+      readonlyTuple: readonly [{ firstName: string }, { lastName: string }];
     }>();
   });
 
-  it('aligns with Env camel accessor output', () => {
+  it('preserves readonly and optional modifiers at each level', () => {
+    type Input = {
+      readonly CONFIG_VALUE?: {
+        readonly FIXED_KEY: string;
+        MUTABLE_KEY: number;
+      };
+      ITEMS: ReadonlyArray<{ readonly ITEM_ID: string; ITEM_COUNT: number }>;
+    };
+
+    expectTypeOf<snakeToCamel<Input>>().toEqualTypeOf<{
+      readonly configValue?: { readonly fixedKey: string; mutableKey: number };
+      items: ReadonlyArray<{ readonly itemId: string; itemCount: number }>;
+    }>();
+  });
+
+  it('aligns with Env.toCamelCase output', () => {
     const envSchema = z
       .object({
         STRING_REQUIRED: z.string(),
@@ -64,8 +70,6 @@ describe('snakeToCamel (type)', () => {
         NUMBER_OPTIONAL: z.coerce.number().optional(),
         BOOLEAN_REQUIRED: z.coerce.boolean(),
         BOOLEAN_OPTIONAL: z.coerce.boolean().optional(),
-        BIGINT_REQUIRED: z.coerce.bigint(),
-        BIGINT_OPTIONAL: z.coerce.bigint().optional(),
       })
       .transform((data) => {
         const result: {
@@ -75,14 +79,11 @@ describe('snakeToCamel (type)', () => {
           NUMBER_OPTIONAL?: string;
           BOOLEAN_REQUIRED?: boolean;
           BOOLEAN_OPTIONAL: boolean;
-          BIGINT_REQUIRED: bigint;
-          BIGINT_OPTIONAL?: bigint;
           INTRODUCED_FIELD: string;
         } = {
           STRING_REQUIRED: data.STRING_REQUIRED.trim(),
           NUMBER_REQUIRED: `value:${data.NUMBER_REQUIRED}`,
           BOOLEAN_OPTIONAL: data.BOOLEAN_OPTIONAL ?? false,
-          BIGINT_REQUIRED: data.BIGINT_REQUIRED,
           INTRODUCED_FIELD: `${data.STRING_REQUIRED.trim()}-${Number(data.NUMBER_REQUIRED)}`,
         };
 
@@ -98,25 +99,19 @@ describe('snakeToCamel (type)', () => {
           result.BOOLEAN_REQUIRED = data.BOOLEAN_REQUIRED;
         }
 
-        if (data.BIGINT_OPTIONAL !== undefined) {
-          result.BIGINT_OPTIONAL = data.BIGINT_OPTIONAL;
-        }
-
         return result;
       });
 
     type CamelEnv = snakeToCamel<z.infer<typeof envSchema>>;
 
     expectTypeOf<CamelEnv>().toEqualTypeOf<{
-      readonly stringRequired: string;
-      readonly stringOptional?: string;
-      readonly numberRequired: string;
-      readonly numberOptional?: string;
-      readonly booleanRequired?: boolean;
-      readonly booleanOptional: boolean;
-      readonly bigintRequired: bigint;
-      readonly bigintOptional?: bigint;
-      readonly introducedField: string;
+      stringRequired: string;
+      stringOptional?: string;
+      numberRequired: string;
+      numberOptional?: string;
+      booleanRequired?: boolean;
+      booleanOptional: boolean;
+      introducedField: string;
     }>();
 
     const rawSource = {
@@ -126,8 +121,6 @@ describe('snakeToCamel (type)', () => {
       NUMBER_OPTIONAL: '7',
       BOOLEAN_REQUIRED: '',
       BOOLEAN_OPTIONAL: '1',
-      BIGINT_REQUIRED: '64',
-      BIGINT_OPTIONAL: '128',
     } as const;
 
     const transformed = envSchema.parse(rawSource);
@@ -138,17 +131,15 @@ describe('snakeToCamel (type)', () => {
       NUMBER_REQUIRED: 'value:42',
       NUMBER_OPTIONAL: 'opt:7',
       BOOLEAN_OPTIONAL: true,
-      BIGINT_REQUIRED: BigInt(64),
-      BIGINT_OPTIONAL: BigInt(128),
       INTRODUCED_FIELD: 'hello-42',
     });
     expect(transformed.BOOLEAN_REQUIRED).toBeUndefined();
 
     const env = Env.fromZod(envSchema, rawSource);
 
-    const camelEnv: CamelEnv = env.camel;
+    const camelEnv: CamelEnv = env.toCamelCase();
 
-    expectTypeOf(env.camel).toEqualTypeOf<CamelEnv>();
+    expectTypeOf(env.toCamelCase()).toEqualTypeOf<CamelEnv>();
 
     expect(camelEnv).toMatchObject({
       stringRequired: 'hello',
@@ -156,8 +147,6 @@ describe('snakeToCamel (type)', () => {
       numberRequired: 'value:42',
       numberOptional: 'opt:7',
       booleanOptional: true,
-      bigintRequired: BigInt(64),
-      bigintOptional: BigInt(128),
       introducedField: 'hello-42',
     });
 

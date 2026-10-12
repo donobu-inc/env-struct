@@ -1,8 +1,70 @@
 import { describe, expect, expectTypeOf, it } from 'vitest';
 import { z, ZodError, ZodObject } from 'zod/v4';
 import { Env } from '../src';
+import type { EnvPick } from '../src';
 
 describe('Env', () => {
+  it.each(['shape', 'object', 'names', 'values'] as const)(
+    'rejects the declared __proto__ key consistently through the %s factory',
+    (factory) => {
+      const shape = { ['__proto__']: z.string() };
+      const source = { ['__proto__']: 'value' };
+      const create = () => {
+        switch (factory) {
+          case 'shape':
+            return Env.fromZod(shape, source);
+          case 'object':
+            return Env.fromZod(z.object(shape), source);
+          case 'names':
+            return Env.fromNames(['__proto__'], source);
+          case 'values':
+            return Env.fromValues(source);
+        }
+      };
+      expect(create).toThrow(TypeError);
+      expect(create).toThrow(
+        '"__proto__" is not supported as a declared environment variable name',
+      );
+      expect(Object.getPrototypeOf(source)).toBe(Object.prototype);
+      expect(source.__proto__).toBe('value');
+    },
+  );
+
+  it('ignores an undeclared __proto__ source key when parsing and narrowing', () => {
+    const env = Env.fromNames(['PORT'], { PORT: '3000', ['__proto__']: 'unused' });
+    expect(env.data.PORT).toBe('3000');
+    expect(env.pick('PORT').source).toEqual({ PORT: '3000' });
+    expect(env.omit().source).toEqual({ PORT: '3000' });
+    expect(env.toCamelCase()).toEqual({ port: '3000' });
+  });
+
+  it.each([undefined, '128'])(
+    'parses bigint data with an optional source value of %s',
+    (optional) => {
+      const env = Env.fromZod(
+        {
+          BIGINT_REQUIRED: z.coerce.bigint(),
+          BIGINT_OPTIONAL: z.coerce.bigint().optional(),
+        },
+        { BIGINT_REQUIRED: '9007199254740993', BIGINT_OPTIONAL: optional },
+      );
+
+      expectTypeOf(env.data.BIGINT_REQUIRED).toEqualTypeOf<bigint>();
+      expectTypeOf(env.data.BIGINT_OPTIONAL).toEqualTypeOf<bigint | undefined>();
+      expect(env.data.BIGINT_REQUIRED).toBe(9007199254740993n);
+      expect(env.data.BIGINT_OPTIONAL).toBe(optional === undefined ? undefined : 128n);
+      expect(env.meta.BIGINT_REQUIRED).toEqual({
+        name: 'BIGINT_REQUIRED',
+        raw: '9007199254740993',
+        val: 9007199254740993n,
+      });
+      expect(env.meta.BIGINT_OPTIONAL.raw).toBe(optional);
+      expect(env.meta.BIGINT_OPTIONAL.val).toBe(env.data.BIGINT_OPTIONAL);
+      expect(env.pick('BIGINT_REQUIRED').data.BIGINT_REQUIRED).toBe(9007199254740993n);
+      expect(env.omit('BIGINT_REQUIRED').data.BIGINT_OPTIONAL).toBe(env.data.BIGINT_OPTIONAL);
+    },
+  );
+
   it('parses typed values, and exposes rich metadata', () => {
     const schema = z.object({
       PORT: z.number(),
@@ -49,20 +111,128 @@ describe('Env', () => {
     expect(Object.isFrozen(env.meta)).toBe(true);
     expect(Object.isFrozen(env.meta.PORT)).toBe(true);
     expect(Object.isFrozen(env.data)).toBe(true);
-    expect(Object.isFrozen(env.camel)).toBe(true);
+    expect(Object.isFrozen(env.toCamelCase())).toBe(false);
 
-    expect(env.camel).toEqual({
+    expect(env.toCamelCase()).toEqual({
       port: 8080,
       featureEnabled: true,
       config: { nested: 'value' },
       optional: '  whitespace is preserved for string fields  ',
       camelCased: 'alreadyCamel',
     });
-    expect(env.camel.featureEnabled).toBe(true);
-    expect(env.camel.camelCased).toBe('alreadyCamel');
+    expect(env.toCamelCase().featureEnabled).toBe(true);
+    expect(env.toCamelCase().camelCased).toBe('alreadyCamel');
   });
 
-  it('camel accessor tolerates key collisions from snake/camel aliases', () => {
+  it('freezes accessor containers without freezing or revalidating nested values', () => {
+    const env = Env.fromZod(
+      {
+        CONFIG: z.object({ retries: z.number().positive() }),
+        TAGS: z.array(z.string()),
+      },
+      { CONFIG: '{"retries":3}', TAGS: '["initial"]' },
+    );
+
+    for (const container of [env.data, env.meta, env.meta.CONFIG, env.keys]) {
+      expect(Object.isFrozen(container)).toBe(true);
+    }
+    expect(Reflect.set(env.data, 'CONFIG', { retries: 9 })).toBe(false);
+    expect(Object.isFrozen(env.data.CONFIG)).toBe(false);
+    expect(Object.isFrozen(env.data.TAGS)).toBe(false);
+    expectTypeOf(env.toCamelCase()).toEqualTypeOf<{
+      config: { retries: number };
+      tags: string[];
+    }>();
+
+    env.data.CONFIG.retries = -1;
+    env.data.TAGS.push('added');
+    expect(env.data.CONFIG.retries).toBe(-1);
+    expect(env.meta.CONFIG.val).toBe(env.data.CONFIG);
+    expect(env.meta.CONFIG.val.retries).toBe(-1);
+    expect(env.toCamelCase().tags).not.toBe(env.data.TAGS);
+    expect(env.meta.TAGS.val).toEqual(['initial', 'added']);
+    expect(env.meta.CONFIG.raw).toBe('{"retries":3}');
+    expect(() => env.schema.parse(env.data)).toThrow(ZodError);
+  });
+
+  it('preserves schema-level readonly types and shallow freezing through every value view', () => {
+    const env = Env.fromZod(
+      {
+        CONFIG: z
+          .object({
+            retries: z.number(),
+            nested: z.object({ count: z.number() }),
+            fixed: z.object({ count: z.number() }).readonly(),
+          })
+          .readonly(),
+        ITEMS: z.array(z.object({ count: z.number() })).readonly(),
+      },
+      {
+        CONFIG: '{"retries":3,"nested":{"count":1},"fixed":{"count":2}}',
+        ITEMS: '[{"count":1}]',
+      },
+    );
+
+    type Config = {
+      readonly retries: number;
+      readonly nested: { count: number };
+      readonly fixed: { readonly count: number };
+    };
+    expectTypeOf(env.data.CONFIG).toEqualTypeOf<Config>();
+    expectTypeOf(env.toCamelCase().config).toEqualTypeOf<Config>();
+    expectTypeOf(env.meta.CONFIG.val).toEqualTypeOf<Config>();
+    expectTypeOf(env.toCamelCase().items).toEqualTypeOf<ReadonlyArray<{ count: number }>>();
+
+    for (const config of [env.data.CONFIG, env.toCamelCase().config, env.meta.CONFIG.val]) {
+      expect(Object.isFrozen(config)).toBe(true);
+      expect(Reflect.set(config, 'retries', 9)).toBe(false);
+      expect(Object.isFrozen(config.fixed)).toBe(true);
+      expect(Reflect.set(config.fixed, 'count', 9)).toBe(false);
+      expect(Object.isFrozen(config.nested)).toBe(false);
+    }
+    expect(Object.isFrozen(env.data.ITEMS)).toBe(true);
+    expect(() => (env.data.ITEMS as unknown[]).push({ count: 2 })).toThrow(TypeError);
+    const copy = env.toCamelCase();
+    copy.config.nested.count = 7;
+    copy.items[0].count = 8;
+    expect(copy.config.nested.count).toBe(7);
+    expect(copy.items[0].count).toBe(8);
+    expect(env.data.CONFIG.nested.count).toBe(1);
+    expect(env.data.ITEMS[0].count).toBe(1);
+    expect(env.meta.ITEMS.val[0].count).toBe(1);
+  });
+
+  it('preserves Zod readonly map and set types without promising runtime immutability', () => {
+    const env = Env.fromZod(
+      {
+        LIMITS: z
+          .array(z.tuple([z.string(), z.number()]))
+          .transform((entries) => new Map(entries))
+          .readonly(),
+        TAGS: z
+          .array(z.string())
+          .transform((tags) => new Set(tags))
+          .readonly(),
+        START_AT: z.coerce.date().readonly(),
+      },
+      { LIMITS: '[["requests",100]]', TAGS: '["initial"]', START_AT: '2026-10-12' },
+    );
+
+    expectTypeOf(env.data.LIMITS).toEqualTypeOf<ReadonlyMap<string, number>>();
+    expectTypeOf(env.data.TAGS).toEqualTypeOf<ReadonlySet<string>>();
+    expectTypeOf(env.data.START_AT).toEqualTypeOf<Date>();
+    expect(Object.isFrozen(env.data.LIMITS)).toBe(true);
+    expect(Object.isFrozen(env.data.TAGS)).toBe(true);
+    expect(Object.isFrozen(env.data.START_AT)).toBe(true);
+    (env.data.LIMITS as Map<string, number>).set('requests', 200);
+    (env.data.TAGS as Set<string>).add('added');
+    env.data.START_AT.setUTCFullYear(2027);
+    expect(env.data.LIMITS.get('requests')).toBe(200);
+    expect(env.data.TAGS.has('added')).toBe(true);
+    expect(env.meta.START_AT.val.getUTCFullYear()).toBe(2027);
+  });
+
+  it('reports top-level camelCase collisions only when conversion is requested', () => {
     const schema = z.object({
       FOO_BAR: z.string(),
       fooBar: z.string().optional(),
@@ -75,11 +245,13 @@ describe('Env', () => {
 
     expect(env.data.FOO_BAR).toBe('fromSnake');
     expect(env.data.fooBar).toBe('fromCamel');
-    expect(env.camel.fooBar).toBe('fromSnake');
+    expect(() => env.toCamelCase()).toThrow(
+      'key collision at $: "FOO_BAR" and "fooBar" both become "fooBar"',
+    );
   });
 
   it('supports constructing from a plain ZodRawShape', () => {
-    const env = Env.fromSchema(
+    const env = Env.fromZod(
       {
         PORT: z.number(),
         NAME: z.string(),
@@ -195,6 +367,7 @@ describe('Env', () => {
         PORT: '4200',
         TOKEN: 'secret',
         OPTIONAL: 'maybe',
+        UNDECLARED_SECRET: 'another-secret',
       },
     );
 
@@ -206,12 +379,16 @@ describe('Env', () => {
     expect(withoutToken.meta.PORT.val).toBe(4200);
     expect((withoutToken.data as any).TOKEN).toBeUndefined();
     expect('TOKEN' in withoutToken.meta).toBe(false);
-    expect(withoutToken.source).toBe(base.source);
+    expect(withoutToken.source).toEqual({ PORT: '4200', OPTIONAL: 'maybe' });
+    expect(withoutToken.source).not.toBe(base.source);
+    expect(base.source.TOKEN).toBe('secret');
+    expect(base.data.TOKEN).toBe('secret');
+    expect(JSON.stringify(withoutToken)).not.toContain('secret');
     expect(withoutToken.keys).toEqual({
       PORT: 'PORT',
       OPTIONAL: 'OPTIONAL',
     });
-    expect(withoutToken.camel).toEqual({
+    expect(withoutToken.toCamelCase()).toEqual({
       port: 4200,
       optional: 'maybe',
     });
@@ -232,7 +409,7 @@ describe('Env', () => {
     );
   });
 
-  it('continues to honour cross-field refinements for omit subsets', () => {
+  it('drops whole-object super-refinements from omit subsets', () => {
     const schema = z
       .object({
         USERNAME: z.string(),
@@ -256,6 +433,11 @@ describe('Env', () => {
     const subset = env.omit('MIRROR');
     expect(subset.data.USERNAME).toBe('admin');
     expect('MIRROR' in subset.data).toBe(false);
+    expect(subset.source).toEqual({ USERNAME: 'admin' });
+    expect(subset.schema.parse({ USERNAME: 'other' })).toEqual({ USERNAME: 'other' });
+    expect(() => env.schema.parse({ USERNAME: 'other', MIRROR: 'admin' })).toThrow(
+      /mirror must match username/,
+    );
 
     expect(() =>
       Env.fromZod(schema, {
@@ -385,11 +567,12 @@ describe('Env', () => {
     expect(env.meta.TAGS.raw).toBe(' ["foo", "bar"] ');
   });
 
-  it('creates a scoped Env via pick while sharing the same source', () => {
+  it('creates a scoped Env via pick with an independent source containing only selected keys', () => {
     const baseEnv = Env.fromNames(['FOO', 'BAR', 'BAZ'] as const, {
       FOO: ' foo ',
       BAR: 'bar',
       BAZ: 'baz',
+      UNDECLARED_SECRET: 'secret',
     });
 
     const subset = baseEnv.pick('FOO', 'BAR');
@@ -399,9 +582,19 @@ describe('Env', () => {
     expect(subset.keys).toEqual({ FOO: 'FOO', BAR: 'BAR' });
     expect(subset.meta.FOO.raw).toBe(' foo ');
     expect(subset.meta.BAR.raw).toBe('bar');
+    expect(subset.source).toEqual({ FOO: ' foo ', BAR: 'bar' });
+    expect(subset.source).not.toBe(baseEnv.source);
+    expect(subset.data).toEqual({ FOO: ' foo ', BAR: 'bar' });
+    expect(subset.toCamelCase()).toEqual({ foo: ' foo ', bar: 'bar' });
+    expect(Object.keys(subset.meta)).toEqual(['FOO', 'BAR']);
+
+    baseEnv.source.FOO = 'changed';
+    expect(subset.source.FOO).toBe(' foo ');
+    subset.source.BAR = 'subset-only';
+    expect(baseEnv.source.BAR).toBe('bar');
   });
 
-  it('preserves schema refinements when using pick', () => {
+  it('drops whole-object checks when using pick, even when all keys are retained', () => {
     const schema = z
       .object({
         FLAG: z.literal('enabled'),
@@ -425,30 +618,112 @@ describe('Env', () => {
 
     const subset = env.pick('FLAG', 'SECRET');
 
-    expect(() =>
-      subset.schema.parse({
-        FLAG: 'enabled',
-      }),
-    ).toThrow(ZodError);
+    expect(subset.schema.parse({ FLAG: 'enabled' })).toEqual({ FLAG: 'enabled' });
+    expect(() => env.schema.parse({ FLAG: 'enabled' })).toThrow(ZodError);
+    expect(() => subset.schema.parse({ FLAG: 'disabled' })).toThrow(ZodError);
+  });
+
+  it.each(['pick', 'omit'] as const)(
+    '%s retains field validation, transforms, defaults, and nested refinements',
+    (method) => {
+      const schema = z
+        .object({
+          PORT: z
+            .number()
+            .int()
+            .positive()
+            .refine((port) => port !== 8080, 'reserved port'),
+          LABEL: z.string().transform((label) => label.trim()),
+          DEFAULTED: z.number().default(3000),
+          OPTIONAL: z.string().optional(),
+          RANGE: z
+            .object({ min: z.number(), max: z.number() })
+            .refine((range) => range.min <= range.max, 'invalid range'),
+          SECRET: z.string(),
+        })
+        .refine((data) => data.SECRET === 'secret', 'invalid secret');
+      const source = {
+        PORT: '4200',
+        LABEL: ' hello ',
+        RANGE: '{"min":1,"max":2}',
+        SECRET: 'secret',
+      };
+      const env = Env.fromZod(schema, source);
+      // Narrowing reads current values but does not run the whole-object rule.
+      source.SECRET = 'changed';
+      const narrow = () =>
+        method === 'pick'
+          ? env.pick('PORT', 'LABEL', 'DEFAULTED', 'OPTIONAL', 'RANGE')
+          : env.omit('SECRET');
+      const subset = narrow();
+
+      expect(subset.data).toEqual({
+        PORT: 4200,
+        LABEL: 'hello',
+        DEFAULTED: 3000,
+        OPTIONAL: undefined,
+        RANGE: { min: 1, max: 2 },
+      });
+      expect(subset.source).toEqual({
+        PORT: '4200',
+        LABEL: ' hello ',
+        DEFAULTED: undefined,
+        OPTIONAL: undefined,
+        RANGE: '{"min":1,"max":2}',
+      });
+      expect(subset.meta.LABEL).toEqual({ name: 'LABEL', raw: ' hello ', val: 'hello' });
+      expectTypeOf(subset.data.PORT).toEqualTypeOf<number>();
+      expectTypeOf(subset.data.OPTIONAL).toEqualTypeOf<string | undefined>();
+      expect(() => subset.schema.parse({ ...subset.data, PORT: -1 })).toThrow(ZodError);
+      expect(() => subset.schema.parse({ ...subset.data, PORT: 8080 })).toThrow(/reserved port/);
+      expect(() => subset.schema.parse({ ...subset.data, RANGE: { min: 2, max: 1 } })).toThrow(
+        /invalid range/,
+      );
+      source.PORT = '8080';
+      expect(narrow).toThrow(/reserved port/);
+      expect(env.data.PORT).toBe(4200);
+    },
+  );
+
+  it('supports empty subsets and chained narrowing without restoring excluded fields', () => {
+    const env = Env.fromNames(['FOO', 'BAR'], { FOO: 'foo', BAR: 'bar', SECRET: 'secret' });
+    const subset = env.pick('FOO', 'BAR').omit('BAR').pick('FOO');
+    expect(subset.source).toEqual({ FOO: 'foo' });
+    expect(env.omit().source).toEqual({ FOO: 'foo', BAR: 'bar' });
+    for (const empty of [env.pick(), env.omit('FOO', 'BAR')]) {
+      expect(empty.source).toEqual({});
+      expect(empty.data).toEqual({});
+      expect(empty.meta).toEqual({});
+      expect(empty.toCamelCase()).toEqual({});
+      expect(empty.keys).toEqual({});
+    }
+    expect(() => subset.pick('BAR' as any)).toThrow(/undeclared key "BAR"/);
+  });
+
+  it('uses field output types and values after dropping whole-object transforms', () => {
+    const env = Env.fromZod(
+      z
+        .object({ COUNT: z.string(), SECRET: z.string() })
+        .transform((data) => ({ COUNT: Number(data.COUNT), ADDED: data.SECRET })),
+      { COUNT: '42', SECRET: 'secret' },
+    );
+    const picked = env.pick('COUNT');
+    const omitted = env.omit('SECRET');
+    expectTypeOf(picked).toEqualTypeOf<EnvPick<typeof env, 'COUNT'>>();
+    expectTypeOf(omitted).toEqualTypeOf<typeof picked>();
+    expectTypeOf(picked.data.COUNT).toEqualTypeOf<string>();
+    expectTypeOf(omitted.data.COUNT).toEqualTypeOf<string>();
+    for (const subset of [picked, omitted]) {
+      expect(subset.data).toEqual({ COUNT: '42' });
+      expect(subset.toCamelCase()).toEqual({ count: '42' });
+      expect(subset.meta.COUNT.val).toBe('42');
+      expect(subset.source).toEqual({ COUNT: '42' });
+      expect(subset.schema.parse({ COUNT: '43' })).toEqual({ COUNT: '43' });
+    }
+    expect(env.data).toEqual({ COUNT: 42, ADDED: 'secret' });
   });
 
   describe('factory helpers', () => {
-    it('creates an Env via fromSchema', () => {
-      const env = Env.fromSchema(
-        {
-          PORT: z.number(),
-          HOST: z.string(),
-        },
-        {
-          PORT: '5000',
-          HOST: ' example.com ',
-        },
-      );
-
-      expect(env.data.PORT).toBe(5000);
-      expect(env.data.HOST).toBe(' example.com ');
-    });
-
     it('creates an Env via fromZod', () => {
       const schema = z.object({
         API_KEY: z.string(),
@@ -512,7 +787,7 @@ describe('Env', () => {
       });
       expect(env.data.API_KEY).toBe('secret');
       expect(env.meta.API_KEY.val).toBe('secret');
-      expect(env.camel.port).toBe(8080);
+      expect(env.toCamelCase().port).toBe(8080);
       expect(env.schema.shape.PORT).toBeDefined();
     });
 
@@ -544,17 +819,18 @@ describe('Env', () => {
         'REMOVE_ME' extends keyof typeof env.data ? true : false
       >().toEqualTypeOf<false>();
       expect((env.data as any)['REMOVE_ME']).toBeUndefined();
-      expect(env.camel.count).toBe(42);
-      expect(env.camel.addedField).toBe('count:42');
-      expect(env.camel.optionalFlag).toBe(false);
+      expect(env.toCamelCase().count).toBe(42);
+      expect(env.toCamelCase().addedField).toBe('count:42');
+      expect(env.toCamelCase().optionalFlag).toBe(false);
 
       type ExpectedCamel = {
-        readonly count: number;
-        readonly addedField: string;
-        readonly optionalFlag: boolean;
+        count: number;
+        addedField: string;
+        optionalFlag: boolean;
       };
 
-      expectTypeOf(env.camel).toEqualTypeOf<ExpectedCamel>();
+      expectTypeOf(env.toCamelCase()).toEqualTypeOf<ExpectedCamel>();
+      expect(env.toCamelCase()).not.toHaveProperty('removeMe');
 
       type ExpectedData = {
         readonly COUNT: number;
